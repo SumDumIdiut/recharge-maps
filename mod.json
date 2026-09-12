@@ -1,0 +1,9 @@
+{
+  "id": "recharge.maps",
+  "displayName": "Maps",
+  "version": "1.0.0",
+  "author": "Flipped",
+  "entryAssembly": "RechargeMaps.dll",
+  "minLoaderVersion": "1.0.0",
+  "enabled": true
+}

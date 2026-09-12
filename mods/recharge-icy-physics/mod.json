@@ -1,9 +1,0 @@
-{
-  "id": "recharge.icyphysics",
-  "displayName": "Icy Physics",
-  "version": "1.0.0",
-  "author": "Flipped",
-  "entryAssembly": "RechargeIcyPhysics.dll",
-  "minLoaderVersion": "1.0.0",
-  "enabled": true
-}

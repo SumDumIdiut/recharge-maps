@@ -1,9 +1,0 @@
-{
-  "id": "recharge.pausebuffering",
-  "displayName": "Pause Buffering",
-  "version": "1.0.0",
-  "author": "Flipped",
-  "entryAssembly": "RechargePauseBuffering.dll",
-  "minLoaderVersion": "1.0.0",
-  "enabled": true
-}

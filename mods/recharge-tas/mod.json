@@ -1,9 +1,0 @@
-{
-  "id": "recharge.tas",
-  "displayName": "TAS Tool",
-  "version": "1.0.0",
-  "author": "Flipped",
-  "entryAssembly": "RechargeTas.dll",
-  "minLoaderVersion": "1.0.0",
-  "enabled": true
-}

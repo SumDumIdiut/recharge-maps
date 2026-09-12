@@ -1,9 +1,0 @@
-{
-  "id": "recharge.customskins",
-  "displayName": "Custom Skins",
-  "version": "1.0.0",
-  "author": "Flipped",
-  "entryAssembly": "RechargeCustomSkins.dll",
-  "minLoaderVersion": "1.0.0",
-  "enabled": true
-}

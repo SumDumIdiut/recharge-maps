@@ -1,9 +1,0 @@
-{
-  "id": "yourname.modname",
-  "displayName": "My Mod",
-  "version": "1.0.0",
-  "author": "Your Name",
-  "entryAssembly": "ExampleMod.dll",
-  "minLoaderVersion": "1.0.0",
-  "enabled": true
-}
