@@ -13,7 +13,7 @@ using UnityEngine.UI;
 // instead of acting directly - StartGame/DeleteSave/Settings' row slots
 // become up to 3 individual map entries (Base Game/B-side/every custom map,
 // each its own clickable row - no single "current" selection to page
-// through), a "< i/N >" row below them pages between groups of 3 when there
+// through), a "< >" row below them swaps between groups of 3 when there
 // are more maps than that, and Quit's own slot is taken over by a Back row
 // for as long as picker mode is active.
 internal static class MapMenuBuilder
@@ -176,8 +176,6 @@ internal static class MapMenuBuilder
             }
 
             int totalPages = Math.Max(1, (int)Math.Ceiling(_pages.Count / (double)RowsPerPage));
-            var counter = PagerRow.transform.Find("Counter");
-            if (counter != null) PauseMenuHelper.SetButtonLabel(counter.gameObject, (_pageIndex + 1) + "/" + totalPages);
             bool multi = totalPages > 1;
             var prev = PagerRow.transform.Find("Prev");
             var next = PagerRow.transform.Find("Next");
@@ -285,20 +283,6 @@ internal static class MapMenuBuilder
         var nextBtn = nextGo.GetComponent<Button>();
         nextBtn.onClick = new Button.ButtonClickedEvent();
         nextBtn.onClick.AddListener(state.NextPage);
-
-        var counterGo = UnityEngine.Object.Instantiate(startGame.gameObject, pagerRow.transform);
-        counterGo.name = "Counter";
-        var counterRt = (RectTransform)counterGo.transform;
-        counterRt.anchoredPosition = Vector2.zero;
-        counterRt.sizeDelta = new Vector2(100f, counterRt.sizeDelta.y);
-        // Left with its Button intact but disabled, rather than destroyed -
-        // the real rows' orange comes from the Button's own Normal color
-        // state, not a fixed text color, and disabling (not just clearing
-        // onClick) freezes it there instead of leaving it selectable via
-        // keyboard/gamepad nav or mouse hover (which would flip it to the
-        // Highlighted color, a stray green, since it's still a real Selectable).
-        var counterBtn = counterGo.GetComponent<Button>();
-        if (counterBtn != null) counterBtn.enabled = false;
 
         var backGo = UnityEngine.Object.Instantiate(startGame.gameObject, menu.mainBitPublic.transform);
         backGo.name = "MapsPickerBack";
