@@ -2,7 +2,7 @@
   "id": "recharge.maps",
   "displayName": "Maps",
   "version": "1.0.1",
-  "author": "Flipped",
+  "author": "Recharge",
   "description": "Core infrastructure for loading and playing real-asset custom maps, and for switching between Base Game and B-Side. Required by the Maps tab and by multiplayer's map hosting.",
   "entryAssembly": "RechargeMaps.dll",
   "minLoaderVersion": "1.0.0",
