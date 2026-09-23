@@ -4,7 +4,7 @@ using Recharge.ModApi;
 public class RechargeMapsMod : IRechargeMod
 {
     public string Id => "recharge.maps";
-    public string DisplayName => "Maps";
+    public string DisplayName => "Navigator";
     public Version Version => new Version(1, 0, 0);
 
     public void OnLoad(IRechargeHost host)
