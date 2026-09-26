@@ -18,21 +18,20 @@ using UnityEngine.UI;
 // for as long as picker mode is active.
 internal static class MapMenuBuilder
 {
-    private static readonly BindingFlags NonPublicInstance = BindingFlags.NonPublic | BindingFlags.Instance;
     private const int RowsPerPage = 3;
 
     public static void Install(pauseMenuScript menu)
     {
-        if (menu.mainBitPublic == null || menu.settingsBitPublic == null) return;
-        if (menu.mainBitPublic.transform.Find("MapsInstalled") != null) return; // idempotent per instance
+        if (PauseMenuHelper.MainBit(menu) == null || PauseMenuHelper.SettingsBit(menu) == null) return;
+        if (PauseMenuHelper.MainBit(menu).transform.Find("MapsInstalled") != null) return; // idempotent per instance
 
         var marker = new GameObject("MapsInstalled");
-        marker.transform.SetParent(menu.mainBitPublic.transform, false);
+        marker.transform.SetParent(PauseMenuHelper.MainBit(menu).transform, false);
 
         // The real B-side/hard-mode row (gated behind BsideEnabler, only
         // visible once snfDemoCompleted is set) now lives inside the map
         // picker instead - hide the original so it doesn't float redundantly.
-        var bside = menu.mainBitPublic.GetComponentInChildren<BsideEnabler>(true);
+        var bside = PauseMenuHelper.MainBit(menu).GetComponentInChildren<BsideEnabler>(true);
         if (bside != null) bside.gameObject.SetActive(false);
 
         // True vertical centering, not a guessed offset: this panel's own
@@ -42,12 +41,12 @@ internal static class MapMenuBuilder
         // PauseMenuHelper sizes it for however many mods are installed.
         // Applied once, before that sizing runs, so it's baked into every
         // measurement downstream rather than fighting it after the fact.
-        var mainRt = menu.mainBitPublic.GetComponent<RectTransform>();
+        var mainRt = PauseMenuHelper.MainBit(menu).GetComponent<RectTransform>();
         if (mainRt != null) mainRt.anchoredPosition = new Vector2(mainRt.anchoredPosition.x, 0f);
 
-        var startGame = menu.mainBitPublic.transform.Find("StartGame") as RectTransform;
-        var deleteSave = menu.mainBitPublic.transform.Find("DeleteSave") as RectTransform;
-        var settings = menu.mainBitPublic.transform.Find("Settings") as RectTransform;
+        var startGame = PauseMenuHelper.MainBit(menu).transform.Find("StartGame") as RectTransform;
+        var deleteSave = PauseMenuHelper.MainBit(menu).transform.Find("DeleteSave") as RectTransform;
+        var settings = PauseMenuHelper.MainBit(menu).transform.Find("Settings") as RectTransform;
         if (startGame == null || settings == null) return;
 
         var picker = BuildPicker(menu, startGame);
@@ -104,7 +103,7 @@ internal static class MapMenuBuilder
             if (rowSpacing == 0f) rowSpacing = 60f;
             float pagerY = slot2Y - rowSpacing;
 
-            var quit = Menu.mainBitPublic.transform.Find("QuitToDesktop") as RectTransform;
+            var quit = PauseMenuHelper.MainBit(Menu).transform.Find("QuitToDesktop") as RectTransform;
             float backY = quit != null ? quit.anchoredPosition.y : pagerY - rowSpacing;
 
             ((RectTransform)Slots[0].transform).anchoredPosition = new Vector2(0f, topY);
@@ -116,7 +115,7 @@ internal static class MapMenuBuilder
             StartGame.gameObject.SetActive(false);
             if (DeleteSave != null) DeleteSave.gameObject.SetActive(false);
             Settings.gameObject.SetActive(false);
-            var modsPager = Menu.mainBitPublic.transform.Find("ModsPager");
+            var modsPager = PauseMenuHelper.MainBit(Menu).transform.Find("ModsPager");
             if (modsPager != null) modsPager.gameObject.SetActive(false);
             if (quit != null) quit.gameObject.SetActive(false);
 
@@ -133,9 +132,9 @@ internal static class MapMenuBuilder
             StartGame.gameObject.SetActive(true);
             if (DeleteSave != null) DeleteSave.gameObject.SetActive(true);
             Settings.gameObject.SetActive(true);
-            var modsPager = Menu.mainBitPublic.transform.Find("ModsPager");
+            var modsPager = PauseMenuHelper.MainBit(Menu).transform.Find("ModsPager");
             if (modsPager != null) modsPager.gameObject.SetActive(true);
-            var quit = Menu.mainBitPublic.transform.Find("QuitToDesktop");
+            var quit = PauseMenuHelper.MainBit(Menu).transform.Find("QuitToDesktop");
             if (quit != null) quit.gameObject.SetActive(true);
         }
 
@@ -242,23 +241,23 @@ internal static class MapMenuBuilder
 
     private static PickerState BuildPicker(pauseMenuScript menu, RectTransform startGame)
     {
-        var state = menu.mainBitPublic.gameObject.AddComponent<PickerState>();
+        var state = PauseMenuHelper.MainBit(menu).gameObject.AddComponent<PickerState>();
         state.Menu = menu;
         state.StartGame = startGame;
-        state.DeleteSave = menu.mainBitPublic.transform.Find("DeleteSave") as RectTransform;
-        state.Settings = menu.mainBitPublic.transform.Find("Settings") as RectTransform;
+        state.DeleteSave = PauseMenuHelper.MainBit(menu).transform.Find("DeleteSave") as RectTransform;
+        state.Settings = PauseMenuHelper.MainBit(menu).transform.Find("Settings") as RectTransform;
 
         state.Slots = new GameObject[RowsPerPage];
         for (int i = 0; i < RowsPerPage; i++)
         {
-            var slotGo = UnityEngine.Object.Instantiate(startGame.gameObject, menu.mainBitPublic.transform);
+            var slotGo = UnityEngine.Object.Instantiate(startGame.gameObject, PauseMenuHelper.MainBit(menu).transform);
             slotGo.name = "MapsPickerSlot" + i;
             slotGo.SetActive(false);
             state.Slots[i] = slotGo;
         }
 
         var pagerRow = new GameObject("MapsPickerPager", typeof(RectTransform));
-        pagerRow.transform.SetParent(menu.mainBitPublic.transform, false);
+        pagerRow.transform.SetParent(PauseMenuHelper.MainBit(menu).transform, false);
         pagerRow.SetActive(false);
         state.PagerRow = pagerRow;
 
@@ -284,7 +283,7 @@ internal static class MapMenuBuilder
         nextBtn.onClick = new Button.ButtonClickedEvent();
         nextBtn.onClick.AddListener(state.NextPage);
 
-        var backGo = UnityEngine.Object.Instantiate(startGame.gameObject, menu.mainBitPublic.transform);
+        var backGo = UnityEngine.Object.Instantiate(startGame.gameObject, PauseMenuHelper.MainBit(menu).transform);
         backGo.name = "MapsPickerBack";
         SetButtonLabel(backGo, "Back");
         var backBtn = backGo.GetComponent<Button>();
@@ -340,15 +339,13 @@ internal static class MapMenuBuilder
 
     private static LocalizedString[] GetDeleteMessages(pauseMenuScript menu)
     {
-        var field = typeof(pauseMenuScript).GetField("deleteSaveMessages", NonPublicInstance);
-        return field?.GetValue(menu) as LocalizedString[];
+        return Reflect.TryGetField<LocalizedString[]>(menu, "deleteSaveMessages");
     }
 
     private static string RealDeleteButtonText(pauseMenuScript menu, bool isHard)
     {
         var fieldName = isHard ? "deleteSaveButtonHard" : "deleteSaveButton";
-        var field = typeof(pauseMenuScript).GetField(fieldName, NonPublicInstance);
-        var tmp = field?.GetValue(menu) as TMP_Text;
+        var tmp = Reflect.TryGetField<TMP_Text>(menu, fieldName);
         return tmp != null ? tmp.text : "Delete Savedata";
     }
 }

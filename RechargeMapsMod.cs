@@ -18,17 +18,13 @@ public class RechargeMapsMod : IRechargeMod
         // returning to the main menu after playing - creates a brand new
         // pauseMenuScript with an undecorated mainBitPublic, so re-install
         // against whatever instance is actually live each time a scene loads.
-        host.Events.On(RechargeEvents.SceneLoaded, _ =>
-        {
-            var menu = UnityEngine.Object.FindFirstObjectByType<pauseMenuScript>();
-            if (menu != null) MapMenuBuilder.Install(menu);
-        });
+        PauseMenuHelper.OnMenuReady(host, MapMenuBuilder.Install);
 
         host.Events.On("recharge.maps.load_requested", payload =>
         {
             var mapId = payload as string;
             if (string.IsNullOrEmpty(mapId)) return;
-            var menu = UnityEngine.Object.FindFirstObjectByType<pauseMenuScript>();
+            var menu = PauseMenuHelper.FindMenu();
             if (menu != null) MapManager.Instance.PlayMap(mapId, menu);
         });
     }

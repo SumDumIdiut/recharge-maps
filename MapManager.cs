@@ -5,6 +5,7 @@ using System.Linq;
 using System.Reflection;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
+using Recharge.ModApi;
 using UnityEngine;
 using UnityEngine.SceneManagement;
 using UnityEngine.Tilemaps;
@@ -25,7 +26,6 @@ internal class MapManager : MonoBehaviour
     // hiding except the cloned course template's own DisableBits content.
     private static readonly Vector2 PocketOrigin = new Vector2(50000f, 50000f);
 
-    private static readonly BindingFlags NonPublicInstance = BindingFlags.NonPublic | BindingFlags.Instance;
 
     public static MapManager GetOrCreate()
     {
@@ -163,7 +163,7 @@ internal class MapManager : MonoBehaviour
         // main menu - it has isOnPauseMenu=true, which makes load() read the bundled
         // MenuCourseData.txt (a canned demo ghost-path) instead of a real per-course
         // save file. Force it off so a fresh map starts clean, not replaying that ghost.
-        typeof(courseScript).GetField("isOnPauseMenu", NonPublicInstance)?.SetValue(course, false);
+        Reflect.TrySetField(course, "isOnPauseMenu", false);
         try { course.load(SaveFolder); } catch (Exception e) { Debug.LogWarning("[RechargeMaps] course.load failed (expected on first play): " + e.Message); }
 
         foreach (var obj in group.Objects)
@@ -238,8 +238,8 @@ internal class MapManager : MonoBehaviour
         var positionsToken = obj["positions"] as JArray;
         if (positionsToken == null || positionsToken.Count == 0) return;
 
-        var positionDataType = typeof(PlatformMover).GetNestedType("PositionData", BindingFlags.NonPublic);
-        var tweenType = typeof(PlatformMover).GetNestedType("TweenType", BindingFlags.NonPublic);
+        var positionDataType = Reflect.TryNestedType<PlatformMover>("PositionData");
+        var tweenType = Reflect.TryNestedType<PlatformMover>("TweenType");
         if (positionDataType == null) { Debug.LogWarning("[RechargeMaps] PlatformMover.PositionData not found via reflection"); return; }
 
         var array = Array.CreateInstance(positionDataType, positionsToken.Count);
@@ -264,8 +264,8 @@ internal class MapManager : MonoBehaviour
             array.SetValue(boxed, i);
         }
 
-        typeof(PlatformMover).GetField("Positions", NonPublicInstance)?.SetValue(platform, array);
-        var platformTypeField = typeof(PlatformMover).GetField("PlatformType", NonPublicInstance);
+        Reflect.TrySetField(platform, "Positions", array);
+        var platformTypeField = Reflect.FieldOf<PlatformMover>("PlatformType");
         if (platformTypeField != null) platformTypeField.SetValue(platform, Enum.ToObject(platformTypeField.FieldType, 0)); // NONE - avoids the ZipMoversUnlocked gate
         platform.JumpToState(0);
     }
@@ -386,13 +386,12 @@ internal class MapManager : MonoBehaviour
         if (swapper == null || tilemapGo == null) return;
 
         var fieldName = isOrange ? "orange" : "blue";
-        var field = typeof(colouredBlockSwapper).GetField(fieldName, NonPublicInstance);
-        if (field == null) return;
+        if (Reflect.FieldOf<colouredBlockSwapper>(fieldName) == null) return;
 
-        var current = (GameObject[])field.GetValue(swapper) ?? Array.Empty<GameObject>();
+        var current = Reflect.GetField<GameObject[]>(swapper, fieldName) ?? Array.Empty<GameObject>();
         if (current.Contains(tilemapGo)) return;
         var updated = current.Concat(new[] { tilemapGo }).ToArray();
-        field.SetValue(swapper, updated);
+        Reflect.SetField(swapper, fieldName, updated);
     }
 
     private void SpawnGates(MapGroup group, Transform courseTransform, courseScript course)
@@ -423,10 +422,9 @@ internal class MapManager : MonoBehaviour
             // resetPoint is a private GameObject ref the source scene wired to some
             // external marker that isn't part of the cloned subtree, so it comes
             // across null and startGate.OnTriggerStay2D NullRefs on every touch.
-            var resetPointField = typeof(startGate).GetField("resetPoint", NonPublicInstance);
-            if (resetPointField != null && resetPointField.GetValue(start) == null)
+            if (Reflect.FieldOf<startGate>("resetPoint") != null && Reflect.GetField<GameObject>(start, "resetPoint") == null)
             {
-                resetPointField.SetValue(start, start.gameObject);
+                Reflect.SetField(start, "resetPoint", start.gameObject);
             }
         }
 
@@ -436,7 +434,7 @@ internal class MapManager : MonoBehaviour
             // triggering the tier-multiplier reward calc. Rewards here are author-configured
             // (see MapRewardTrigger), so force this off - keeps every other real side effect
             // (tracking stop, courseResetPoint reset) intact.
-            typeof(endGate).GetField("isEndOfCourse", NonPublicInstance)?.SetValue(end, false);
+            Reflect.TrySetField(end, "isEndOfCourse", false);
 
             if (group.Reward != null && group.Reward.Amount > 0 && Enum.TryParse(group.Reward.Currency, out globalStats.Currencies currency))
             {
@@ -530,12 +528,11 @@ internal class MapManager : MonoBehaviour
 
     private static void SetPrivate(object target, string fieldName, object value)
     {
-        target.GetType().GetField(fieldName, NonPublicInstance)?.SetValue(target, value);
+        Reflect.TrySetField(target, fieldName, value);
     }
 
     private static void SetStructField(Type structType, ref object boxed, string fieldName, object value)
     {
-        var field = structType.GetField(fieldName, NonPublicInstance | BindingFlags.Public);
-        field?.SetValue(boxed, value);
+        Reflect.TrySetField(boxed, fieldName, value); // boxed is a reference, so this mutates the boxed struct in place
     }
 }

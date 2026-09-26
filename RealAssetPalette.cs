@@ -4,6 +4,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Reflection;
+using Recharge.ModApi;
 using UnityEngine;
 using UnityEngine.Tilemaps;
 
@@ -312,8 +313,8 @@ internal static class RealAssetPalette
         clone.SetActive(true);
 
         var sr = clone.GetComponentInChildren<SpriteRenderer>();
-        var animField = typeof(SpringScript).GetField("anim", BindingFlags.NonPublic | BindingFlags.Instance);
-        var animator = animField?.GetValue(clone.GetComponent<SpringScript>()) as Animator;
+        var spring = clone.GetComponent<SpringScript>();
+        var animator = spring != null ? Reflect.TryGetField<Animator>(spring, "anim") : null;
 
         if (sr == null || animator == null)
         {
