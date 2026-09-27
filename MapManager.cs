@@ -476,7 +476,7 @@ internal class MapManager : MonoBehaviour
 
         if (movement.cam != null)
         {
-            movement.cam.setup(spawnPos, 40f); // TEMP: wider than default for Phase-1 visual verification
+            movement.cam.setup(spawnPos, movement.cam.camSize); // the player's own zoom, as the game's respawn does
             movement.cam.newTarget(playerGo, movement.cam.defaultoffset, true, Vector2.zero);
         }
 
@@ -516,7 +516,7 @@ internal class MapManager : MonoBehaviour
 
         if (movement.cam != null)
         {
-            movement.cam.setup(spawnPos, 40f);
+            movement.cam.setup(spawnPos, movement.cam.camSize);
             movement.cam.newTarget(playerTransform.gameObject, movement.cam.defaultoffset, true, Vector2.zero);
         }
     }
