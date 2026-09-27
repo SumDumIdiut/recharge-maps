@@ -207,8 +207,8 @@ internal static class MapMenuBuilder
         // Custom map: no vanilla equivalent exists, so this drives its own
         // escalating confirm (reusing the same real localized messages,
         // tracked per row since several maps can be on screen at once) and,
-        // on the final click, deletes only that map's own course-progress
-        // file, reloading it live if it's the one currently in the pocket.
+        // on the final click, deletes that map's own save folder (never Base
+        // Game's), reloading it live if it's the one currently in the pocket.
         private void ClickDelete(GameObject slot, MapPage page)
         {
             if (page.Kind == MapPageKind.Custom)
@@ -219,7 +219,7 @@ internal static class MapMenuBuilder
                 _deleteCounters[page.MapId] = counter;
                 if (messages == null || counter >= 4)
                 {
-                    MapManager.DeleteMapSave(page.MapId);
+                    MapSaves.Delete(page.MapId);
                     if (MapManager.CurrentMapId == page.MapId) MapManager.Instance.LoadMap(page.MapId);
                     _deleteCounters[page.MapId] = 0;
                     PauseMenuHelper.SetButtonLabel(slot, RowLabel(page));

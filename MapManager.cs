@@ -51,6 +51,8 @@ internal class MapManager : MonoBehaviour
         SceneManager.sceneLoaded += (scene, mode) =>
         {
             CurrentMapId = null;
+            MapSaves.Forget(this);
+            MapSaves.DropWithDeletedSaves();
             _currentCourseGo = null;
             _overlayUndo.Clear();
             _realTilemaps = null;
@@ -128,7 +130,10 @@ internal class MapManager : MonoBehaviour
         if (RealAssetPalette.Get<SpringScript>() != null) StartCoroutine(RealAssetPalette.CaptureSpringAnimation());
     }
 
-    public static string SaveFolder => "/Savedata" + (globalStats.difficultyLevel == 1 ? "hard" : "");
+    // Called by MapSaves' repeating Invoke while a map's save is active.
+    public void MapAutosave() => MapSaves.Autosave();
+
+    private void OnApplicationQuit() => MapSaves.SaveNow();
 
     public void LoadMap(string mapId)
     {
@@ -141,6 +146,8 @@ internal class MapManager : MonoBehaviour
             if (def?.Groups == null || def.Groups.Count == 0) { Debug.LogError("[RechargeMaps] map has no groups: " + mapId); return; }
 
             RevertOverlay();
+            // The map's own save folder, loaded before the player is placed.
+            MapSaves.Enter(mapId, this);
             LoadCustomImages(mapId, def);
             if (def.Overlay) SpawnOverlay(mapId, def);
             else
@@ -156,16 +163,12 @@ internal class MapManager : MonoBehaviour
         }
     }
 
-    // Deletes just the given map's own course-progress file (courseScript.save/
-    // load already namespace it by courseNumber - see StableCourseNumber - so
-    // this never touches real Base Game/B-side data or any other custom map's
-    // progress, unlike the vanilla Delete Save buttons which wipe a whole
-    // folder). Works on any map id, not just the one currently loaded - the
-    // Maps panel lets a player browse to and delete a map's save without
-    // having to load it first.
+    // Deletes just the given map's course progress (times, ghost) from its
+    // save folder, keeping the rest of its save - a map maker test run starts
+    // its course fresh. MapSaves.Delete clears a map's whole save.
     public static void DeleteMapSave(string mapId)
     {
-        var path = Application.persistentDataPath + SaveFolder + "/course" + StableCourseNumber(mapId) + "data.txt";
+        var path = Application.persistentDataPath + MapSaves.FolderFor(mapId) + "/course" + StableCourseNumber(mapId) + "data.txt";
         try { if (File.Exists(path)) File.Delete(path); }
         catch (Exception e) { Debug.LogWarning("[RechargeMaps] delete map save failed: " + e.Message); }
     }
@@ -202,7 +205,7 @@ internal class MapManager : MonoBehaviour
         // MenuCourseData.txt (a canned demo ghost-path) instead of a real per-course
         // save file. Force it off so a fresh map starts clean, not replaying that ghost.
         Reflect.TrySetField(course, "isOnPauseMenu", false);
-        try { course.load(SaveFolder); } catch (Exception e) { Debug.LogWarning("[RechargeMaps] course.load failed (expected on first play): " + e.Message); }
+        try { course.load(MapSaves.ActiveFolder); } catch (Exception e) { Debug.LogWarning("[RechargeMaps] course.load failed (expected on first play): " + e.Message); }
 
         return course;
     }
