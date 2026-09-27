@@ -17,7 +17,13 @@ internal static class RealAssetPalette
     private static readonly Dictionary<Type, Component> Templates = new Dictionary<Type, Component>();
     private static readonly Dictionary<string, Tilemap> TilemapTemplates = new Dictionary<string, Tilemap>();
     private static readonly Dictionary<string, List<TileBase>> TilePalettes = new Dictionary<string, List<TileBase>>();
-    private static readonly string[] TilemapNames = { "ground", "blueBlocks", "orangeBlocks" };
+    // Every tilemap a map's "tile" objects may paint onto (the deadly ones carry
+    // spikeScript), besides the plain ground/coloured-ground types.
+    private static readonly string[] TilemapNames =
+    {
+        "ground", "blueBlocks", "orangeBlocks",
+        "Spikes", "hiddenSpikes", "backgroundSpikes1", "backgroundSpikes2", "OvergrowthSpikes", "blueSpikes", "orangeSpikes",
+    };
     private static GameObject _holder;
 
     public static Vector3 GroundCellSize { get; private set; } = new Vector3(32f, 32f, 1f);
@@ -152,6 +158,13 @@ internal static class RealAssetPalette
         }
     }
 
+    // The demo's main ground tilemap is "ground"; the full game's is
+    // "new awesome nikki ground". Maps always ask for "ground".
+    private static bool MatchesTilemap(string sceneName, string wanted)
+    {
+        return sceneName == wanted || (wanted == "ground" && sceneName == "new awesome nikki ground");
+    }
+
     private static void ScanTilemaps()
     {
         foreach (var name in TilemapNames)
@@ -161,7 +174,7 @@ internal static class RealAssetPalette
             Tilemap found = null;
             foreach (var tm in Resources.FindObjectsOfTypeAll<Tilemap>())
             {
-                if (tm.gameObject.scene.IsValid() && tm.gameObject.name == name) { found = tm; break; }
+                if (tm.gameObject.scene.IsValid() && MatchesTilemap(tm.gameObject.name, name)) { found = tm; break; }
             }
             if (found == null) continue;
 

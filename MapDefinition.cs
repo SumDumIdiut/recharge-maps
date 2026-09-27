@@ -9,6 +9,12 @@ internal class MapDefinition
     [JsonProperty("images")] public List<string> Images = new List<string>();
     [JsonProperty("groups")] public List<MapGroup> Groups = new List<MapGroup>();
     [JsonProperty("customImages")] public List<MapCustomImage> CustomImages = new List<MapCustomImage>();
+    // Overlay maps are edits to the real base-game world at its own coordinates
+    // (made on top of the imported base map); others are self-contained and
+    // spawn in the far-away pocket. baseState picks area 1's look for overlays:
+    // "start" (start of the game) or "overgrown" (after the breaker trips).
+    [JsonProperty("overlay")] public bool Overlay;
+    [JsonProperty("baseState")] public string BaseState;
 }
 
 internal class MapCustomImage
@@ -23,6 +29,11 @@ internal class MapGroup
     [JsonProperty("startY")] public float StartY;
     [JsonProperty("endX")] public float EndX;
     [JsonProperty("endY")] public float EndY;
+    // Optional: where the player spawns (defaults to the start gate), and
+    // whether the map has start/end gates at all - a free-play map has none.
+    [JsonProperty("spawnX")] public float? SpawnX;
+    [JsonProperty("spawnY")] public float? SpawnY;
+    [JsonProperty("gates")] public bool Gates = true;
     [JsonProperty("reward")] public MapReward Reward;
     [JsonProperty("objects")] public List<Newtonsoft.Json.Linq.JObject> Objects = new List<Newtonsoft.Json.Linq.JObject>();
 }
