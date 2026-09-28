@@ -186,6 +186,7 @@ internal class MapUpgradeBox : MonoBehaviour
             case "wallJump": Movement(upgradeBox.movementUpgrades.wallJump); break;
             case "blockSwap": Movement(upgradeBox.movementUpgrades.unlockBlockSwap); break;
             case "zipMovers": Global(globalStats.globalUpgradeSet.zipMoversUnlocked); break;
+            case "omniDash": Global(globalStats.globalUpgradeSet.vmanTime); _omni = true; break;
             case "refreshers": Global(globalStats.globalUpgradeSet.unlockJiggleDrops); break;
             case "clones": Local(localUpgrades.localUpgradeSet.cloneCount); break;
             case "baseReward": Local(localUpgrades.localUpgradeSet.cashPerLoop); break;
@@ -239,7 +240,18 @@ internal class MapUpgradeBox : MonoBehaviour
         _box.movementUpgrade = kind;
     }
 
-    private bool _local, _linked;
+    private bool _local, _linked, _omni;
+
+    // The game's own omni dash box also turns the world overgrown; a map's
+    // box gives just the ability, and takes the midair jump it says it does.
+    private static void GiveOmniDash()
+    {
+        var mv = UnityEngine.Object.FindFirstObjectByType<Movement>();
+        if (mv == null) return;
+        mv.omniDashUnlocked = true;
+        mv.maxAirJumps = Math.Max(0, mv.maxAirJumps - 1);
+        mv.airJumpsLeft = Math.Min(mv.airJumpsLeft, mv.maxAirJumps);
+    }
 
     private void Local(localUpgrades.localUpgradeSet kind)
     {
@@ -288,6 +300,7 @@ internal class MapUpgradeBox : MonoBehaviour
         }
         if (_box.TimesUsed != _seen)
         {
+            if (_omni && _seen >= 0 && _box.TimesUsed > _seen) GiveOmniDash();
             _seen = _box.TimesUsed;
             if (_seen < _max)
             {
