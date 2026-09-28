@@ -41,7 +41,7 @@ public static class MapSaves
     {
         if (ActiveMapId == mapId) return;
         if (ActiveMapId != null) SaveAll(FolderFor(ActiveMapId));
-        else SaveAll(RealFolder); // keep Base Game progress up to the moment the map starts
+        else if (!SceneIsFresh) SaveAll(RealFolder); // keep Base Game progress up to the moment the map starts
 
         var folder = FolderFor(mapId);
         ActiveMapId = mapId;
@@ -56,9 +56,73 @@ public static class MapSaves
             }
         }
         catch (Exception e) { Debug.LogWarning("[RechargeMaps] map save load failed: " + e.Message); }
+        MapUpgrades.Load(folder);
 
         host.CancelInvoke(nameof(MapManager.MapAutosave));
         host.InvokeRepeating(nameof(MapManager.MapAutosave), AutosaveSeconds, AutosaveSeconds);
+    }
+
+    // A map with its own starting settings begins as a brand-new game: the
+    // real save's playerdata.txt is set aside while the gameplay scene starts,
+    // so the game's Saveloader finds no save and builds a new-game state, then
+    // it's put straight back. Nothing is saved to the real folder meanwhile.
+    private const string HoldSuffix = ".navigator-hold";
+    public static bool SceneIsFresh { get; private set; }
+    private static bool _holding;
+
+    public static bool NeedsFreshStart(string mapId, Newtonsoft.Json.Linq.JObject player)
+    {
+        if (player == null) return false;
+        var folder = Full(FolderFor(mapId));
+        if (!File.Exists(folder + "/playerdata.txt")) return true;
+        try { return !File.Exists(folder + "/navigator-start.json") || File.ReadAllText(folder + "/navigator-start.json") != player.ToString(Newtonsoft.Json.Formatting.None); }
+        catch { return true; }
+    }
+
+    public static void PrepareFreshStart(string mapId)
+    {
+        DeleteFolder(mapId);
+        var real = Full(RealFolder) + "/playerdata.txt";
+        try
+        {
+            if (File.Exists(real))
+            {
+                if (File.Exists(real + HoldSuffix)) File.Delete(real + HoldSuffix);
+                File.Move(real, real + HoldSuffix);
+            }
+            _holding = true;
+        }
+        catch (Exception e) { Debug.LogWarning("[RechargeMaps] couldn't set the real save aside: " + e.Message); }
+    }
+
+    // Called on every scene load, at startup and at quit: the real save is always put back.
+    public static void RestoreRealSave(bool sceneJustLoaded)
+    {
+        SceneIsFresh = sceneJustLoaded && _holding;
+        _holding = false;
+        foreach (var suffix in new[] { "", "hard" })
+        {
+            var real = Full("/Savedata" + suffix) + "/playerdata.txt";
+            try
+            {
+                if (!File.Exists(real + HoldSuffix)) continue;
+                File.Copy(real + HoldSuffix, real, true);
+                File.Delete(real + HoldSuffix);
+            }
+            catch (Exception e) { Debug.LogError("[RechargeMaps] couldn't put the real save back (" + real + HoldSuffix + "): " + e.Message); }
+        }
+        if (SceneIsFresh) SetGameSaving(false);
+    }
+
+    public static void DeleteFolder(string mapId)
+    {
+        var path = Full(FolderFor(mapId));
+        try
+        {
+            if (Directory.Exists(path)) Directory.Delete(path, true);
+            if (Directory.Exists(path + "backup")) Directory.Delete(path + "backup", true);
+        }
+        catch (Exception e) { Debug.LogWarning("[RechargeMaps] clearing map save failed: " + e.Message); }
     }
 
     // The scene is being replaced (a new Saveloader loads the real save): stop.
@@ -92,6 +156,7 @@ public static class MapSaves
         try { if (Directory.Exists(path)) Directory.Delete(path, true); }
         catch (Exception e) { Debug.LogWarning("[RechargeMaps] delete map save failed: " + e.Message); }
         if (ActiveMapId != mapId) return;
+        MapUpgrades.Reset();
         LoadAll(RealFolder);
         SaveAll(FolderFor(mapId));
     }
@@ -113,6 +178,8 @@ public static class MapSaves
     private static void SaveAll(string folder)
     {
         Directory.CreateDirectory(Full(folder));
+        Directory.CreateDirectory(Full(folder) + "backup");
+        if (folder != RealFolder) MapUpgrades.Save(folder);
         foreach (var obj in UnityEngine.Object.FindObjectsByType<SaveableObject>(FindObjectsSortMode.None))
         {
             try { obj.save(folder); }

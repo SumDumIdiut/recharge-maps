@@ -460,7 +460,32 @@ internal static class RealAssetPalette
     {
         EnsurePalette(tilemapName);
         if (!TilePalettes.TryGetValue(tilemapName, out var tiles)) return null;
-        return tiles.FirstOrDefault(t => t.name == tileName);
+        return tiles.FirstOrDefault(t => t.name == tileName) ?? LooseTile(tileName);
+    }
+
+    // A tile the level never places (a blue block's bottom corners, say): the
+    // game's own Tile asset if it's loaded, else a plain tile made from the
+    // tileset sprite of that name.
+    private static readonly Dictionary<string, TileBase> LooseTiles = new Dictionary<string, TileBase>();
+    private static TileBase LooseTile(string tileName)
+    {
+        if (string.IsNullOrEmpty(tileName)) return null;
+        if (LooseTiles.TryGetValue(tileName, out var cached)) return cached;
+        TileBase found = Resources.FindObjectsOfTypeAll<TileBase>().FirstOrDefault(t => t.name == tileName);
+        if (found == null)
+        {
+            var sprite = Resources.FindObjectsOfTypeAll<Sprite>().FirstOrDefault(s => s.name == tileName);
+            if (sprite != null)
+            {
+                var tile = ScriptableObject.CreateInstance<Tile>();
+                tile.name = tileName;
+                tile.sprite = sprite;
+                tile.colliderType = Tile.ColliderType.Grid;
+                found = tile;
+            }
+        }
+        LooseTiles[tileName] = found;
+        return found;
     }
 
     public static T Spawn<T>(Vector3 worldPos, Quaternion rotation, Transform parent) where T : Component

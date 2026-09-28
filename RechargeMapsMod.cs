@@ -11,6 +11,7 @@ public class RechargeMapsMod : IRechargeMod
 
     public void OnLoad(IRechargeHost host)
     {
+        MapSaves.RestoreRealSave(false);
         MapManager.GetOrCreate();
         MapMenuBuilder.Install(host.PauseMenu);
 
@@ -35,7 +36,7 @@ public class RechargeMapsMod : IRechargeMod
 
     // The Recharge map maker's "Test in game" writes the map, then this file
     // naming it, then launches the game - so the first load (the title screen)
-    // goes straight into that map, from a fresh save each time.
+    // goes straight into that map, on that map's own save.
     private static void PlayRequestedTestMap()
     {
         var request = Path.Combine(MapPaths.ModsRoot, "recharge.maps", "autoplay.txt");
@@ -53,7 +54,6 @@ public class RechargeMapsMod : IRechargeMod
         }
         if (mapId.Length == 0) return;
 
-        MapManager.DeleteMapSave(mapId);
         var menu = PauseMenuHelper.FindMenu();
         // The title screen already has a Player, but starting the game reloads
         // the scene and would wipe a map spawned now - so always start the

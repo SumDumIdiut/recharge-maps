@@ -21,6 +21,8 @@ internal class MapManager : MonoBehaviour
     public static string CurrentMapId { get; private set; }
 
     private GameObject _currentCourseGo;
+    private readonly List<GameObject> _extraCourseGos = new List<GameObject>();
+    private readonly List<(GameObject go, string course)> _pendingLinks = new List<(GameObject, string)>();
 
     // Far from any real course geometry (~-10000..20000), so nothing needs
     // hiding except the cloned course template's own DisableBits content.
@@ -50,10 +52,13 @@ internal class MapManager : MonoBehaviour
         UnityEngine.Object.DontDestroyOnLoad(gameObject);
         SceneManager.sceneLoaded += (scene, mode) =>
         {
+            MapSaves.RestoreRealSave(true);
             CurrentMapId = null;
             MapSaves.Forget(this);
             MapSaves.DropWithDeletedSaves();
             _currentCourseGo = null;
+            _extraCourseGos.Clear();
+            _pendingLinks.Clear();
             _overlayUndo.Clear();
             _realTilemaps = null;
             RealAssetPalette.ScanCurrentScene();
@@ -77,6 +82,7 @@ internal class MapManager : MonoBehaviour
     // when there's no Player yet, then loads the map once one actually exists.
     public void PlayMap(string mapId, pauseMenuScript menu)
     {
+        if (StartFresh(mapId, menu)) return;
         var playerGo = GameObject.FindGameObjectWithTag("Player");
         if (playerGo != null && playerGo.GetComponent<Movement>() != null)
         {
@@ -89,8 +95,21 @@ internal class MapManager : MonoBehaviour
 
     public void PlayMapAfterSceneChange(string mapId, pauseMenuScript menu)
     {
+        if (StartFresh(mapId, menu)) return;
         _pendingMapId = mapId;
         menu.changeScene();
+    }
+
+    private bool StartFresh(string mapId, pauseMenuScript menu)
+    {
+        MapDefinition def;
+        try { def = JsonConvert.DeserializeObject<MapDefinition>(File.ReadAllText(Path.Combine(MapPaths.MapsDir, mapId, "map.json"))); }
+        catch { return false; }
+        if (menu == null || !MapSaves.NeedsFreshStart(mapId, def?.Player)) return false;
+        MapSaves.PrepareFreshStart(mapId);
+        _pendingMapId = mapId;
+        menu.changeScene();
+        return true;
     }
 
     // Waits - across scene loads, since this lives on a DontDestroyOnLoad
@@ -105,7 +124,7 @@ internal class MapManager : MonoBehaviour
         {
             var playerGo = GameObject.FindGameObjectWithTag("Player");
             var movement = playerGo != null ? playerGo.GetComponent<Movement>() : null;
-            if (movement != null && !Reflect.GetField<bool>(movement, "isOnMainMenu") && !Reflect.GetField<bool>(movement, "init")) break;
+            if (movement != null && !Reflect.GetField<bool>(movement, "isOnMainMenu") && (!Reflect.GetField<bool>(movement, "init") || (MapSaves.SceneIsFresh && waited > 0.5f))) break;
             if (waited > 60f)
             {
                 Debug.LogWarning("[RechargeMaps] gave up waiting for a gameplay Player to load '" + _pendingMapId + "' into");
@@ -133,7 +152,11 @@ internal class MapManager : MonoBehaviour
     // Called by MapSaves' repeating Invoke while a map's save is active.
     public void MapAutosave() => MapSaves.Autosave();
 
-    private void OnApplicationQuit() => MapSaves.SaveNow();
+    private void OnApplicationQuit()
+    {
+        MapSaves.SaveNow();
+        MapSaves.RestoreRealSave(false);
+    }
 
     public void LoadMap(string mapId)
     {
@@ -143,11 +166,14 @@ internal class MapManager : MonoBehaviour
             if (!File.Exists(path)) { Debug.LogError("[RechargeMaps] map not found: " + path); return; }
 
             var def = JsonConvert.DeserializeObject<MapDefinition>(File.ReadAllText(path));
+            _mapCamSize = def?.CameraSize > 0 ? def.CameraSize.Value : DefaultMapCamSize;
             if (def?.Groups == null || def.Groups.Count == 0) { Debug.LogError("[RechargeMaps] map has no groups: " + mapId); return; }
 
             RevertOverlay();
             // The map's own save folder, loaded before the player is placed.
             MapSaves.Enter(mapId, this);
+            MapUpgrades.ApplyStart(def.Player, MapSaves.ActiveFolder);
+            MapUpgrades.EnsureMapUnlocks(def);
             LoadCustomImages(mapId, def);
             if (def.Overlay) SpawnOverlay(mapId, def);
             else
@@ -175,7 +201,7 @@ internal class MapManager : MonoBehaviour
 
     // A clone of the cached real course (course 1) with its DisableBits
     // emptied: gives a map its own courseScript for timing, gates and saves.
-    private courseScript CreateCourse(string mapId, Vector2 at)
+    private courseScript CreateCourse(string mapId, Vector2 at, string extraId = null)
     {
         var courseTemplate = RealAssetPalette.Get<courseScript>();
         if (courseTemplate == null)
@@ -184,12 +210,17 @@ internal class MapManager : MonoBehaviour
             return null;
         }
 
-        if (_currentCourseGo != null) { Destroy(_currentCourseGo); _currentCourseGo = null; }
+        if (extraId == null)
+        {
+            if (_currentCourseGo != null) { Destroy(_currentCourseGo); _currentCourseGo = null; }
+            foreach (var extra in _extraCourseGos) if (extra != null) Destroy(extra);
+            _extraCourseGos.Clear();
+        }
 
         var courseGo = Instantiate(courseTemplate.gameObject, Live(at), Quaternion.identity);
-        courseGo.name = "RechargeMap_" + mapId;
+        courseGo.name = "RechargeMap_" + mapId + (extraId != null ? "_" + extraId : "");
         courseGo.SetActive(true);
-        _currentCourseGo = courseGo;
+        if (extraId == null) _currentCourseGo = courseGo; else _extraCourseGos.Add(courseGo);
         var course = courseGo.GetComponent<courseScript>();
 
         var disableBits = courseGo.transform.Find("DisableBits");
@@ -198,7 +229,7 @@ internal class MapManager : MonoBehaviour
             foreach (Transform child in disableBits) Destroy(child.gameObject);
         }
 
-        course.courseNumber = StableCourseNumber(mapId);
+        course.courseNumber = StableCourseNumber(extraId == null ? mapId : mapId + "#" + extraId);
         course.init = true;
         // The cloned template is "course 1", the decorative course shown behind the
         // main menu - it has isOnPauseMenu=true, which makes load() read the bundled
@@ -207,7 +238,50 @@ internal class MapManager : MonoBehaviour
         Reflect.TrySetField(course, "isOnPauseMenu", false);
         try { course.load(MapSaves.ActiveFolder); } catch (Exception e) { Debug.LogWarning("[RechargeMaps] course.load failed (expected on first play): " + e.Message); }
 
+        // The template's own upgrade boxes belong to course 1: switched off, kept
+        // in place so the course save's per-child box data still lines up.
+        var local = courseGo.GetComponentInChildren<localUpgrades>(true);
+        if (local != null) foreach (Transform box in local.transform) box.gameObject.SetActive(false);
+
         return course;
+    }
+
+    // The map's courses: each start/end pair from the editor, or the single
+    // legacy pair. The first uses 'first' (the map's own course object).
+    private static List<MapCourse> CoursesOf(MapGroup group)
+    {
+        if (group.Courses != null && group.Courses.Count > 0) return group.Courses;
+        if (!group.Gates) return new List<MapCourse>();
+        return new List<MapCourse> { new MapCourse { Id = null, StartX = group.StartX, StartY = group.StartY, EndX = group.EndX, EndY = group.EndY, Reward = group.Reward } };
+    }
+
+    private void SpawnCourses(string mapId, MapGroup group, courseScript first, Vector2 at)
+    {
+        var byId = new Dictionary<string, courseScript>();
+        var specs = CoursesOf(group);
+        for (int i = 0; i < specs.Count; i++)
+        {
+            var spec = specs[i];
+            var course = i == 0 && first != null ? first : CreateCourse(mapId, at, spec.Id ?? ("course" + i));
+            if (course == null) continue;
+            SpawnGates(new Vector2(spec.StartX, spec.StartY), new Vector2(spec.EndX, spec.EndY), spec.Reward, course.transform, course);
+            if (spec.Id != null) byId[spec.Id] = course;
+        }
+        foreach (var (go, id) in _pendingLinks)
+        {
+            if (go == null || id == null || !byId.TryGetValue(id, out var course)) continue;
+            var box = go.GetComponent<MapUpgradeBox>();
+            if (box != null) box.LinkCourse(course);
+            else go.transform.SetParent(course.transform, true);
+        }
+        _pendingLinks.Clear();
+        foreach (var course in byId.Values.Concat(first != null ? new[] { first } : new courseScript[0]).Distinct())
+        {
+            var clones = course.transform.Find("Clones");
+            var local = course.GetComponentInChildren<localUpgrades>(true);
+            bool linked = local != null && local.GetComponentsInChildren<MapUpgradeBox>(true).Length > 0;
+            if (clones != null) clones.gameObject.SetActive(linked);
+        }
     }
 
     private void SpawnGroup(string mapId, MapGroup group)
@@ -245,7 +319,7 @@ internal class MapManager : MonoBehaviour
             }
         }
 
-        if (group.Gates) SpawnGates(group, courseGo.transform, course);
+        SpawnCourses(mapId, group, course, PocketOrigin);
         MovePlayerIn(group);
 
         Debug.Log("[RechargeMaps] spawned map '" + mapId + "' (courseNumber=" + course.courseNumber + ") at pocket " + PocketOrigin);
@@ -302,6 +376,7 @@ internal class MapManager : MonoBehaviour
                     }
                     case "erase": OverlayErase(obj); break;
                     case "hide": OverlayHide(obj); break;
+                    case "modify": OverlayModify(obj); break;
                     case "clone": SpawnClone(obj, OverlayRoot(mapId)); break;
                     default: Debug.LogWarning("[RechargeMaps] overlay: unsupported object type '" + type + "', skipped"); continue;
                 }
@@ -313,22 +388,14 @@ internal class MapManager : MonoBehaviour
             }
         }
 
-        if (group.Gates)
+        if (CoursesOf(group).Count > 0)
         {
-            // Gates need a courseScript parent to report to: a map-owned course
-            // at the origin, with the template's own upgrade boxes and clone
-            // machinery switched off so they don't duplicate the real course's.
+            // Gates need a courseScript parent to report to: map-owned courses
+            // at the origin (the template's own boxes and clones switched off).
             var course = CreateCourse(mapId, Vector2.zero);
-            if (course != null)
-            {
-                foreach (var child in new[] { "localUpgrades", "Clones" })
-                {
-                    var t = course.transform.Find(child);
-                    if (t != null) t.gameObject.SetActive(false);
-                }
-                SpawnGates(group, course.transform, course);
-            }
+            SpawnCourses(mapId, group, course, Vector2.zero);
         }
+        else _pendingLinks.Clear();
         MovePlayerIn(group);
         Debug.Log("[RechargeMaps] applied overlay map '" + mapId + "' (" + done + "/" + group.Objects.Count + " edits) to the real world");
     }
@@ -441,12 +508,33 @@ internal class MapManager : MonoBehaviour
         }
     }
 
+    private void OverlayModify(JObject obj)
+    {
+        var path = obj["path"]?.Value<string>();
+        var target = string.IsNullOrEmpty(path) ? null : FindSceneObject(path, SourcePos(obj), null);
+        if (target == null) throw new Exception("no scene object at '" + path + "'");
+        if (obj["upgrade"] is JObject upgrade)
+        {
+            var undo = MapUpgrades.OverrideBox(target.gameObject, upgrade);
+            if (undo != null) _overlayUndo.Add(undo);
+        }
+    }
+
     private void OverlayHide(JObject obj)
     {
         var path = obj["path"]?.Value<string>();
         var target = string.IsNullOrEmpty(path) ? null : FindSceneObject(path, SourcePos(obj), null);
         if (target == null) throw new Exception("no scene object at '" + path + "'");
         var go = target.gameObject;
+        if (obj["rendererOnly"]?.Value<bool>() == true)
+        {
+            var sr = go.GetComponent<SpriteRenderer>();
+            if (sr == null) throw new Exception("no sprite on '" + path + "'");
+            var shown = sr.enabled;
+            sr.enabled = false;
+            _overlayUndo.Add(() => { if (sr != null) sr.enabled = shown; });
+            return;
+        }
         var was = go.activeSelf;
         go.SetActive(false);
         _overlayUndo.Add(() => { if (go != null) go.SetActive(was); });
@@ -844,6 +932,138 @@ internal class MapManager : MonoBehaviour
         var clone = Instantiate(best.gameObject, WorldPos(obj), best.rotation, parent);
         clone.name = best.name;
         clone.SetActive(true);
+        var courseId = obj["course"]?.Value<string>();
+        if (!string.IsNullOrEmpty(courseId)) _pendingLinks.Add((clone, courseId));
+        try { ApplyCloneConfig(clone, obj); }
+        catch (Exception e) { Debug.LogWarning("[RechargeMaps] clone settings for '" + path + "' failed: " + e.Message); }
+    }
+
+    // The map editor's settings for a cloned object: rotation (degrees), scale
+    // [x, y] (negative flips), script fields {"Type.field": value}, and a zip
+    // mover's track {end: [x, y], time, backTime, width}.
+    private static void ApplyCloneConfig(GameObject clone, JObject obj)
+    {
+        var t = clone.transform;
+        if (obj["absolute"]?.Value<bool>() == true)
+        {
+            // Decorations: an exact world rotation and scale, whatever the copied object had.
+            t.rotation = Quaternion.Euler(0f, 0f, obj["rotation"]?.Value<float>() ?? 0f);
+            if (obj["scale"] is JArray abs && abs.Count == 2)
+            {
+                var parentScale = t.parent != null ? t.parent.lossyScale : Vector3.one;
+                t.localScale = new Vector3(abs[0].Value<float>() / parentScale.x, abs[1].Value<float>() / parentScale.y, t.localScale.z);
+            }
+        }
+        else
+        {
+            if (obj["rotation"] != null) t.rotation = Quaternion.Euler(0f, 0f, obj["rotation"].Value<float>()) * t.rotation;
+            if (obj["scale"] is JArray sc && sc.Count == 2)
+                t.localScale = new Vector3(t.localScale.x * sc[0].Value<float>(), t.localScale.y * sc[1].Value<float>(), t.localScale.z);
+        }
+        if (obj["tint"] is JArray tint && tint.Count >= 3)
+        {
+            var sr = clone.GetComponent<SpriteRenderer>();
+            if (sr != null) sr.color = new Color(tint[0].Value<float>(), tint[1].Value<float>(), tint[2].Value<float>(), sr.color.a);
+        }
+        if (obj["width"] != null)
+        {
+            // Stretch a tiled sprite (a wide spring) - sprite and collider together.
+            var width = obj["width"].Value<float>();
+            var sr = clone.GetComponent<SpriteRenderer>();
+            var box = clone.GetComponent<BoxCollider2D>();
+            if (sr != null)
+            {
+                var simple = sr.drawMode == SpriteDrawMode.Simple && sr.sprite != null;
+                var old = simple ? sr.sprite.rect.width / sr.sprite.pixelsPerUnit : sr.size.x;
+                var height = simple ? sr.sprite.rect.height / sr.sprite.pixelsPerUnit : sr.size.y;
+                sr.drawMode = SpriteDrawMode.Tiled;
+                sr.size = new Vector2(width, height);
+                if (box != null && old > 0f) box.size = new Vector2(box.size.x * width / old, box.size.y);
+            }
+        }
+        if (obj["fields"] is JObject fields)
+        {
+            foreach (var prop in fields.Properties())
+            {
+                var dot = prop.Name.LastIndexOf('.');
+                if (dot <= 0) continue;
+                var typeName = prop.Name.Substring(0, dot);
+                var fieldName = prop.Name.Substring(dot + 1);
+                foreach (var comp in clone.GetComponentsInChildren<Component>(true))
+                {
+                    if (comp == null || comp.GetType().Name != typeName) continue;
+                    var f = comp.GetType().GetField(fieldName, BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+                    if (f != null) f.SetValue(comp, Convert.ChangeType(prop.Value.Value<double>(), f.FieldType));
+                }
+            }
+        }
+        if (obj["zip"] is JObject zip) ApplyZip(clone, zip);
+        if (obj["upgrade"] is JObject upgrade) MapUpgrades.ApplyBox(clone, upgrade);
+        MapUpgrades.PrepareRefresher(clone);
+    }
+
+    private static void ApplyZip(GameObject clone, JObject zip)
+    {
+        var mover = clone.GetComponentInChildren<PlatformMover>(true);
+        if (mover == null) return;
+        var endArr = zip["end"] as JArray;
+        var end = endArr != null && endArr.Count == 2 ? new Vector2(endArr[0].Value<float>(), endArr[1].Value<float>()) : Vector2.zero;
+        // Positions is an array of a private struct: edit boxed copies, write them back.
+        var posField = typeof(PlatformMover).GetField("Positions", BindingFlags.Instance | BindingFlags.NonPublic);
+        if (posField?.GetValue(mover) is Array positions && positions.Length >= 2)
+        {
+            var elemType = positions.GetType().GetElementType();
+            var position = elemType.GetField("position");
+            var time = elemType.GetField("timeToReachFromPrevious");
+            var last = positions.GetValue(positions.Length - 1);
+            position.SetValue(last, end);
+            if (zip["time"] != null) time.SetValue(last, zip["time"].Value<float>());
+            positions.SetValue(last, positions.Length - 1);
+            var first = positions.GetValue(0);
+            if (zip["backTime"] != null) time.SetValue(first, zip["backTime"].Value<float>());
+            positions.SetValue(first, 0);
+            posField.SetValue(mover, positions);
+        }
+        // The track and its end node follow the new path.
+        var len = end.magnitude;
+        var dir = len > 0.001f ? end / len : Vector2.up;
+        foreach (var tr in clone.GetComponentsInChildren<Transform>(true))
+        {
+            if (tr.name == "ZipTrack")
+            {
+                tr.localPosition = end / 2f + dir * 5f;
+                tr.localRotation = Quaternion.Euler(0f, 0f, Mathf.Atan2(dir.y, dir.x) * Mathf.Rad2Deg);
+                var sr = tr.GetComponent<SpriteRenderer>();
+                if (sr != null) sr.size = new Vector2(len + 30f, sr.size.y);
+            }
+            else if (tr.name == "ZipNode (1)") tr.localPosition = end - dir * 5f;
+        }
+        // The platform's size: the game shapes it to its track (tall across a
+        // level one, flat across an upright or diagonal one) rather than turning it.
+        if (zip["size"] is JArray sizeArr && sizeArr.Count == 2)
+        {
+            var size = new Vector2(sizeArr[0].Value<float>(), sizeArr[1].Value<float>());
+            var sr = mover.GetComponent<SpriteRenderer>();
+            var box = mover.GetComponent<BoxCollider2D>();
+            if (sr != null)
+            {
+                var old = sr.size;
+                sr.size = size;
+                if (box != null && old.x > 0f && old.y > 0f) box.size = new Vector2(box.size.x * size.x / old.x, box.size.y * size.y / old.y);
+            }
+        }
+        else if (zip["width"] != null)
+        {
+            var width = zip["width"].Value<float>();
+            var sr = mover.GetComponent<SpriteRenderer>();
+            var box = mover.GetComponent<BoxCollider2D>();
+            if (sr != null)
+            {
+                var old = sr.size.x;
+                sr.size = new Vector2(width, sr.size.y);
+                if (box != null && old > 0f) box.size = new Vector2(box.size.x * width / old, box.size.y);
+            }
+        }
     }
 
     private Transform FindSceneObject(string path, Vector2 src, Transform exclude)
@@ -913,10 +1133,10 @@ internal class MapManager : MonoBehaviour
         Reflect.SetField(swapper, fieldName, updated);
     }
 
-    private void SpawnGates(MapGroup group, Transform courseTransform, courseScript course)
+    private void SpawnGates(Vector2 startAt, Vector2 endAt, MapReward reward, Transform courseTransform, courseScript course)
     {
-        var startPos = Live(new Vector2(_origin.x + group.StartX, _origin.y + group.StartY));
-        var endPos = Live(new Vector2(_origin.x + group.EndX, _origin.y + group.EndY));
+        var startPos = Live(new Vector2(_origin.x + startAt.x, _origin.y + startAt.y));
+        var endPos = Live(new Vector2(_origin.x + endAt.x, _origin.y + endAt.y));
 
         var start = RealAssetPalette.Spawn<startGate>(startPos, Quaternion.identity, courseTransform);
         var end = RealAssetPalette.Spawn<endGate>(endPos, Quaternion.identity, courseTransform);
@@ -955,11 +1175,11 @@ internal class MapManager : MonoBehaviour
             // (tracking stop, courseResetPoint reset) intact.
             Reflect.TrySetField(end, "isEndOfCourse", false);
 
-            if (group.Reward != null && group.Reward.Amount > 0 && Enum.TryParse(group.Reward.Currency, out globalStats.Currencies currency))
+            if (reward != null && reward.Amount > 0 && Enum.TryParse(reward.Currency, out globalStats.Currencies currency))
             {
                 var trigger = end.gameObject.AddComponent<MapRewardTrigger>();
                 trigger.Currency = currency;
-                trigger.Amount = group.Reward.Amount;
+                trigger.Amount = reward.Amount;
             }
         }
 
@@ -968,6 +1188,9 @@ internal class MapManager : MonoBehaviour
             Debug.LogWarning("[RechargeMaps] no startGate/endGate template cached yet - visit a real course first");
         }
     }
+
+    private const float DefaultMapCamSize = 752f;
+    private float _mapCamSize = DefaultMapCamSize;
 
     private void MovePlayerIn(MapGroup group)
     {
@@ -1001,7 +1224,7 @@ internal class MapManager : MonoBehaviour
 
         if (movement.cam != null)
         {
-            movement.cam.setup(spawnPos, movement.cam.camSize); // same as the game's own respawn: Movement's load does cam.setup(respawnPoint, savedCamSize)
+            movement.cam.setup(spawnPos, _mapCamSize);
             movement.cam.newTarget(playerGo, movement.cam.defaultoffset, true, Vector2.zero);
         }
 
@@ -1050,9 +1273,32 @@ internal class MapManager : MonoBehaviour
 
         if (movement.cam != null)
         {
-            movement.cam.setup(spawnPos, movement.cam.camSize);
+            movement.cam.setup(spawnPos, _mapCamSize);
             movement.cam.newTarget(playerTransform.gameObject, movement.cam.defaultoffset, true, Vector2.zero);
         }
+
+        // The game's own scene start (and a map save's stored camera size) can land after this;
+        // hold the map's size for a moment unless a real zoom zone changes it on purpose.
+        var cam = movement.cam;
+        float held = 0f;
+        while (cam != null && held < 1.5f)
+        {
+            yield return null;
+            held += Time.unscaledDeltaTime;
+            if (cam == null) yield break;
+            if (Mathf.Abs(cam.camSize - _mapCamSize) > 0.5f && !InCamZone(playerTransform)) cam.setup(cam.transform.position, _mapCamSize);
+        }
+    }
+
+    private static bool InCamZone(Transform player)
+    {
+        var col = player != null ? player.GetComponent<Collider2D>() : null;
+        if (col == null) return false;
+        var hits = new List<Collider2D>();
+        var filter = new ContactFilter2D { useTriggers = true };
+        filter.NoFilter();
+        Physics2D.OverlapCollider(col, filter, hits);
+        return hits.Any(h => h != null && h.GetComponent<camSizeTrigger>() != null);
     }
 
     // Stands the player on the first solid surface below the spawn, so they

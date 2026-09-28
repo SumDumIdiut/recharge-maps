@@ -15,6 +15,8 @@ internal class MapDefinition
     // "start" (start of the game) or "overgrown" (after the breaker trips).
     [JsonProperty("overlay")] public bool Overlay;
     [JsonProperty("baseState")] public string BaseState;
+    [JsonProperty("player")] public Newtonsoft.Json.Linq.JObject Player;
+    [JsonProperty("cameraSize")] public float? CameraSize;
 }
 
 internal class MapCustomImage
@@ -36,6 +38,17 @@ internal class MapGroup
     [JsonProperty("gates")] public bool Gates = true;
     [JsonProperty("reward")] public MapReward Reward;
     [JsonProperty("objects")] public List<Newtonsoft.Json.Linq.JObject> Objects = new List<Newtonsoft.Json.Linq.JObject>();
+    [JsonProperty("courses")] public List<MapCourse> Courses;
+}
+
+internal class MapCourse
+{
+    [JsonProperty("id")] public string Id;
+    [JsonProperty("startX")] public float StartX;
+    [JsonProperty("startY")] public float StartY;
+    [JsonProperty("endX")] public float EndX;
+    [JsonProperty("endY")] public float EndY;
+    [JsonProperty("reward")] public MapReward Reward;
 }
 
 internal class MapReward
