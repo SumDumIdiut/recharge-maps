@@ -158,6 +158,29 @@ internal static class RealAssetPalette
         }
     }
 
+    // Any other tilemap a map uses (decoration, background, moss...): its tiles
+    // and a cleared template, scanned the first time it's asked for - from the
+    // tilemap's used-tile list, so even the huge background layers are quick.
+    private static readonly HashSet<string> Missing = new HashSet<string>();
+    private static void EnsurePalette(string name)
+    {
+        if (string.IsNullOrEmpty(name) || TilePalettes.ContainsKey(name) || Missing.Contains(name)) return;
+        Tilemap found = null;
+        foreach (var tm in Resources.FindObjectsOfTypeAll<Tilemap>())
+        {
+            if (tm.gameObject.scene.IsValid() && MatchesTilemap(tm.gameObject.name, name)) { found = tm; break; }
+        }
+        if (found == null) { Missing.Add(name); return; }
+        var used = new TileBase[found.GetUsedTilesCount()];
+        found.GetUsedTilesNonAlloc(used);
+        TilePalettes[name] = used.Where(t => t != null).ToList();
+        var clone = UnityEngine.Object.Instantiate(found.gameObject, Holder.transform);
+        clone.name = name + "_TilemapTemplate";
+        var cloneTilemap = clone.GetComponent<Tilemap>();
+        cloneTilemap.ClearAllTiles();
+        TilemapTemplates[name] = cloneTilemap;
+    }
+
     // The demo's main ground tilemap is "ground"; the full game's is
     // "new awesome nikki ground". Maps always ask for "ground".
     private static bool MatchesTilemap(string sceneName, string wanted)
@@ -423,6 +446,7 @@ internal static class RealAssetPalette
 
     public static Tilemap GetTilemapTemplate(string name)
     {
+        EnsurePalette(name);
         return TilemapTemplates.TryGetValue(name, out var tm) ? tm : null;
     }
 
@@ -434,6 +458,7 @@ internal static class RealAssetPalette
 
     public static TileBase GetTileByName(string tilemapName, string tileName)
     {
+        EnsurePalette(tilemapName);
         if (!TilePalettes.TryGetValue(tilemapName, out var tiles)) return null;
         return tiles.FirstOrDefault(t => t.name == tileName);
     }
