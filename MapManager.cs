@@ -305,6 +305,7 @@ internal class MapManager : MonoBehaviour
                 case "tile": PaintNamedTile(obj, courseGo.transform); break;
                 case "clone": SpawnClone(obj, courseGo.transform); break;
                 case "spike": SpawnSimple<spikeScript>(obj, courseGo.transform); break;
+                case "trueSpike": SpawnTrueSpike(obj, courseGo.transform); break;
                 case "checkpoint": SpawnSimple<checkpointScript>(obj, courseGo.transform); break;
                 case "spring": SpawnSpring(obj, courseGo.transform); break;
                 case "platform": SpawnPlatform(obj, courseGo.transform); break;
@@ -377,6 +378,7 @@ internal class MapManager : MonoBehaviour
                     case "erase": OverlayErase(obj); break;
                     case "hide": OverlayHide(obj); break;
                     case "modify": OverlayModify(obj); break;
+                    case "trueSpike": SpawnTrueSpike(obj, OverlayRoot(mapId)); break;
                     case "clone": SpawnClone(obj, OverlayRoot(mapId)); break;
                     default: Debug.LogWarning("[RechargeMaps] overlay: unsupported object type '" + type + "', skipped"); continue;
                 }
@@ -742,6 +744,36 @@ internal class MapManager : MonoBehaviour
         var spawned = RealAssetPalette.Spawn<T>(WorldPos(obj), Rot(obj), parent);
         if (spawned == null) { Debug.LogWarning("[RechargeMaps] no template cached for " + typeof(T).Name + " yet - visit a course containing one first"); return; }
         ForceTriggerColliders(spawned.gameObject);
+    }
+
+    // A "true spike": the game's spike sprite, tinted, with a kill box twice a
+    // normal spike's (the same base, reaching twice as far) and the game's own
+    // spikeScript, so it kills exactly like a spike does.
+    private void SpawnTrueSpike(JObject obj, Transform parent)
+    {
+        var tileName = obj["tileName"]?.Value<string>() ?? "spike_tileset_0";
+        var tile = RealAssetPalette.GetTileByName("Spikes", tileName) as Tile;
+        var template = RealAssetPalette.GetTilemapTemplate("Spikes");
+        if (tile == null || tile.sprite == null) throw new Exception("no spike tile '" + tileName + "'");
+        var go = new GameObject("TrueSpike");
+        go.transform.SetParent(parent, true);
+        go.transform.SetPositionAndRotation(WorldPos(obj), Rot(obj));
+        if (template != null) go.layer = template.gameObject.layer;
+        var sr = go.AddComponent<SpriteRenderer>();
+        sr.sprite = tile.sprite;
+        var rend = template != null ? template.GetComponent<TilemapRenderer>() : null;
+        if (rend != null) { sr.sortingLayerID = rend.sortingLayerID; sr.sortingOrder = rend.sortingOrder; sr.sharedMaterial = rend.sharedMaterial; }
+        if (obj["color"] is JArray c && c.Count >= 3) sr.color = new Color(c[0].Value<float>(), c[1].Value<float>(), c[2].Value<float>(), 1f);
+        var box = go.AddComponent<BoxCollider2D>();
+        box.isTrigger = true;
+        if (obj["hitbox"] is JArray hb && hb.Count == 4)
+        {
+            float x0 = hb[0].Value<float>(), y0 = hb[1].Value<float>(), x1 = hb[2].Value<float>(), y1 = hb[3].Value<float>();
+            box.offset = new Vector2((x0 + x1) / 2f, (y0 + y1) / 2f);
+            box.size = new Vector2(x1 - x0, y1 - y0);
+        }
+        else box.size = new Vector2(52f, 38f);
+        go.AddComponent<spikeScript>();
     }
 
     private void SpawnSpring(JObject obj, Transform parent)
