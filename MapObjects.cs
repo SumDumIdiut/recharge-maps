@@ -21,6 +21,7 @@ internal static class MapObjects
         ["tile"] = (w, o) => PaintTile(w, o["tilemap"]?.Value<string>() ?? throw new Exception("tile without a tilemap"), o),
         ["trueSpike"] = SpawnTrueSpike,
         ["freeSpike"] = SpawnFreeSpike,
+        ["sign"] = SpawnSign,
         ["clone"] = SpawnClone,
         ["erase"] = LevelOnly(Erase),
         ["hide"] = LevelOnly(Hide),
@@ -73,6 +74,9 @@ internal static class MapObjects
     private static void PaintTile(MapWorld w, string tilemapName, JObject obj)
     {
         var tilemap = w.Tilemap(tilemapName);
+        // A level tilemap that's switched off in this map's state (the overgrowth's
+        // thorn vines at the start of the game): paint the map's own copy, which is on.
+        if (w.Overlay && !tilemap.gameObject.activeInHierarchy) tilemap = w.OwnTilemap(tilemapName + " (map)", tilemapName);
         var tile = TileFor(tilemapName, obj) ?? throw new Exception("no tile '" + (obj["tileName"] ?? obj["tileIndex"]) + "' for '" + tilemapName + "'");
         w.Paint(tilemap, w.CellOf(tilemap, obj), tile, MapWorld.MatrixOf(obj));
     }
@@ -174,6 +178,28 @@ internal static class MapObjects
                 col.points = points;
             }
         go.AddComponent<spikeScript>();
+        if (obj["order"] != null) w.Stacked.Add((obj["order"].Value<int>(), go));
+    }
+
+    // Text saying anything: a copy of one of the level's own sign texts (the
+    // zone 2 statue's green line), so it has the game's font, colour and fit.
+    private static void SpawnSign(MapWorld w, JObject obj)
+    {
+        var path = obj["path"]?.Value<string>();
+        var source = w.FindSceneObject(path, Vector2.zero) ?? throw new Exception("no sign text at '" + path + "' to copy");
+        var scale = source.lossyScale;
+        var go = UnityEngine.Object.Instantiate(source.gameObject, w.Point(obj), Quaternion.Euler(0f, 0f, obj["rotation"]?.Value<float>() ?? 0f), w.Root);
+        go.name = "Text";
+        go.transform.localScale = scale;
+        go.SetActive(true);
+        foreach (var c in go.GetComponents<MonoBehaviour>())
+            if (c != null && c.GetType().Name.StartsWith("Localize")) c.enabled = false;
+        var text = go.GetComponent<TMPro.TMP_Text>() ?? throw new Exception("the sign has no text");
+        text.text = obj["text"]?.Value<string>() ?? "";
+        if (obj["color"] is JArray col && col.Count >= 3) text.color = new Color(col[0].Value<float>(), col[1].Value<float>(), col[2].Value<float>(), 1f);
+        else text.color = new Color(text.color.r, text.color.g, text.color.b, 1f);
+        if (go.transform is RectTransform rect && scale.x != 0f && scale.y != 0f)
+            rect.sizeDelta = new Vector2((obj["width"]?.Value<float>() ?? rect.sizeDelta.x * scale.x) / scale.x, (obj["height"]?.Value<float>() ?? rect.sizeDelta.y * scale.y) / scale.y);
         if (obj["order"] != null) w.Stacked.Add((obj["order"].Value<int>(), go));
     }
 
