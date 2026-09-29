@@ -11,7 +11,7 @@ public class RechargeMapsMod : IRechargeMod
 
     public void OnLoad(IRechargeHost host)
     {
-        MapSaves.RestoreRealSave(false);
+        MapSaves.Recover();
         MapManager.GetOrCreate();
         MapMenuBuilder.Install(host.PauseMenu);
 
@@ -58,7 +58,7 @@ public class RechargeMapsMod : IRechargeMod
         // The title screen already has a Player, but starting the game reloads
         // the scene and would wipe a map spawned now - so always start the
         // game first and load the map once gameplay's Player exists.
-        if (menu != null) MapManager.Instance.PlayMapAfterSceneChange(mapId, menu);
+        if (menu != null) MapManager.Instance.PlayMap(mapId, menu, asNewGame: true);
         else Debug.LogWarning("[RechargeMaps] no menu to start test map '" + mapId + "' from");
     }
 

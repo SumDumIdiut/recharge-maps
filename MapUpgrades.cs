@@ -11,10 +11,26 @@ using UnityEngine;
 internal static class MapUpgrades
 {
     private const string BoxesFile = "/navigator-boxes.json";
-    private const string StartFile = "/navigator-start.json";
     private static Dictionary<string, int> _bought = new Dictionary<string, int>();
 
     private static string Full(string folder) => Application.persistentDataPath + folder;
+
+    // Bumped when what a fresh map start means changes, so older map saves start over once.
+    public static string StartMarker(JObject player) => "v8 " + player.ToString(Formatting.None);
+
+    // The gameplay player: the title screen stays loaded underneath with its own.
+    public static Movement GamePlayer()
+    {
+        var field = typeof(Movement).GetField("isOnMainMenu", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+        Movement fallback = null;
+        foreach (var mv in UnityEngine.Object.FindObjectsByType<Movement>(FindObjectsSortMode.None))
+        {
+            if (mv == null) continue;
+            fallback ??= mv;
+            if (field == null || !(bool)field.GetValue(mv)) return mv;
+        }
+        return fallback;
+    }
 
     public static int Bought(string id) => id != null && _bought.TryGetValue(id, out var n) ? n : 0;
 
@@ -39,13 +55,12 @@ internal static class MapUpgrades
         catch (Exception e) { Debug.LogWarning("[RechargeMaps] saving upgrade boxes failed: " + e.Message); }
     }
 
-    public static void ApplyStart(JObject player, string folder)
+    // A map started as a new game: its Level settings on top of the new game,
+    // remembered so later plays continue from the map's save instead.
+    public static void ApplyStart(string mapId, JObject player)
     {
         if (player == null) return;
-        var json = player.ToString(Formatting.None);
-        var marker = Full(folder) + StartFile;
-        try { if (File.Exists(marker) && File.ReadAllText(marker) == json) return; } catch { }
-        var mv = UnityEngine.Object.FindFirstObjectByType<Movement>();
+        var mv = GamePlayer();
         if (mv == null) return;
         int dashes = Math.Max(0, player["dashes"]?.Value<int>() ?? 1);
         int jumps = Math.Max(0, player["airJumps"]?.Value<int>() ?? 1);
@@ -62,18 +77,12 @@ internal static class MapUpgrades
         globalStats.globalUpgradeDict[globalStats.globalUpgradeSet.unlockJiggleDrops] = (player["refreshers"]?.Value<bool>() ?? true) ? 1.0 : 0.0;
         globalStats.currencyLookup[globalStats.Currencies.Cash] = Math.Max(0.0, player["cash"]?.Value<double>() ?? 0.0);
         Reset();
-        try
-        {
-            Directory.CreateDirectory(Full(folder));
-            File.WriteAllText(marker, json);
-            if (File.Exists(Full(folder) + BoxesFile)) File.Delete(Full(folder) + BoxesFile);
-        }
-        catch (Exception e) { Debug.LogWarning("[RechargeMaps] saving the map's start failed: " + e.Message); }
+        MapSaves.MarkStart(mapId, player);
     }
 
     public static void EnsureMapUnlocks(MapDefinition def)
     {
-        bool zips = false, refreshers = false;
+        bool zips = false, refreshers = false, teleporters = false;
         foreach (var group in def?.Groups ?? new List<MapGroup>())
             foreach (var obj in group.Objects ?? new List<JObject>())
             {
@@ -81,10 +90,12 @@ internal static class MapUpgrades
                 var path = obj["path"]?.Value<string>() ?? "";
                 if (obj["zip"] != null || path.Contains("ZipMover")) zips = true;
                 if (path.Contains("Resetter")) refreshers = true;
+                if (obj["teleport"] != null) teleporters = true;
             }
         var player = def?.Player;
         if (zips && (player?["zipMovers"]?.Value<bool>() ?? true)) Unlock(globalStats.globalUpgradeSet.zipMoversUnlocked);
         if (refreshers && (player?["refreshers"]?.Value<bool>() ?? true)) Unlock(globalStats.globalUpgradeSet.unlockJiggleDrops);
+        if (teleporters) Unlock(globalStats.globalUpgradeSet.unlockTeleporters);
     }
 
     private static void Unlock(globalStats.globalUpgradeSet upgrade)
@@ -193,6 +204,10 @@ internal class MapUpgradeBox : MonoBehaviour
             case "cloneMult": Local(localUpgrades.localUpgradeSet.cloneMult); break;
             case "fastClone": Local(localUpgrades.localUpgradeSet.fastCloneChance); break;
             case "bigClone": Local(localUpgrades.localUpgradeSet.bigCloneChance); break;
+            case "moreWatts": Local(localUpgrades.localUpgradeSet.moreWatts); break;
+            case "greenReward": Local(localUpgrades.localUpgradeSet.GreenCloneRewardBase); break;
+            case "redReward": Local(localUpgrades.localUpgradeSet.baseRP); break;
+            case "cloneDust": Local(localUpgrades.localUpgradeSet.enableCloneDustGeneration); break;
             default: Movement(upgradeBox.movementUpgrades.dash); break;
         }
         if (Enum.TryParse<globalStats.Currencies>(cfg["currency"]?.Value<string>() ?? "Cash", out var currency))
@@ -246,7 +261,7 @@ internal class MapUpgradeBox : MonoBehaviour
     // box gives just the ability, and takes the midair jump it says it does.
     private static void GiveOmniDash()
     {
-        var mv = UnityEngine.Object.FindFirstObjectByType<Movement>();
+        var mv = MapUpgrades.GamePlayer();
         if (mv == null) return;
         mv.omniDashUnlocked = true;
         mv.maxAirJumps = Math.Max(0, mv.maxAirJumps - 1);
@@ -271,6 +286,11 @@ internal class MapUpgradeBox : MonoBehaviour
         typeof(upgradeBox).GetField("localUpgradeScript", Any)?.SetValue(_box, local);
         if (typeof(localUpgrades).GetField("ChildBoxes", Any)?.GetValue(local) is List<upgradeBox> boxes && !boxes.Contains(_box)) boxes.Add(_box);
         _linked = true;
+    }
+
+    public void Unlink(localUpgrades local)
+    {
+        if (typeof(localUpgrades).GetField("ChildBoxes", Any)?.GetValue(local) is List<upgradeBox> boxes) boxes.Remove(_box);
     }
 
     private void Global(globalStats.globalUpgradeSet kind)

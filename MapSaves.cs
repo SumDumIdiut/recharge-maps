@@ -1,31 +1,37 @@
 using System;
 using System.IO;
 using System.Linq;
+using Newtonsoft.Json.Linq;
 using Recharge.ModApi;
 using UnityEngine;
+using UnityEngine.SceneManagement;
 
-// Each map keeps its own save folder (SavedataMaps/<map id>): while a map is
-// loaded, everything the game would save - player, courses, breaker, tree,
-// timer - goes there instead of the real save, so playing (or editing) a map
-// never changes Base Game progress, and each map picks up where it was left.
+// Each map keeps its own save (SavedataMaps/<map id>), so playing a map never
+// changes Base Game progress and each map picks up where it was left.
 //
-// The game saves only through Saveloader (a 10 s autosave, and manualSave
-// from menus and course ends), always to the real folder. While a map's save
-// is active that's switched off and this saves to the map's folder instead;
-// the next scene load brings a fresh Saveloader that loads the real save again.
+// Loading: only ever the game's own way, as a scene starts (see SaveSwap) -
+// playing a map always goes through a scene change with its save swapped in.
+// Saving: while a map is active the game's Saveloader is switched off (it
+// only writes /Savedata) and this saves the same objects to the map's folder,
+// on the game's own rule of never mid-run, plus once as a scene change begins.
 public static class MapSaves
 {
     private const float AutosaveSeconds = 10f;
+    private const string MapsRoot = "/SavedataMaps/";
+    private const string StartFile = "/navigator-start.json";
 
+    // The map whose save is live in this scene (null: Base Game).
     public static string ActiveMapId { get; private set; }
+    // This scene started the active map as a brand-new game.
+    public static bool StartedFresh { get; private set; }
 
-    public static string RealFolder => "/Savedata" + (globalStats.difficultyLevel == 1 ? "hard" : "");
+    public static string FolderFor(string mapId) => MapsRoot + Safe(mapId);
+    public static string ActiveFolder => ActiveMapId != null ? FolderFor(ActiveMapId) : SaveSwap.Game;
 
-    // Where saves go right now: the loaded map's folder, or the real one.
-    public static string ActiveFolder => ActiveMapId != null ? FolderFor(ActiveMapId) : RealFolder;
-
-    // Beside the real save, not in it: the game's Delete Save wipes that whole folder.
-    public static string FolderFor(string mapId) => "/SavedataMaps" + (globalStats.difficultyLevel == 1 ? "hard" : "") + "/" + Safe(mapId);
+    private static string _pendingMapId;
+    private static bool _pendingFresh;
+    private static bool _realSaveSeen;
+    private static bool _savedForSceneChange;
 
     private static string Safe(string mapId)
     {
@@ -33,176 +39,175 @@ public static class MapSaves
         return new string(mapId.Select(c => bad.Contains(c) || c == '/' || c == '\\' ? '_' : c).ToArray());
     }
 
-    private static string Full(string folder) => Application.persistentDataPath + folder;
+    // Mod start: whatever an earlier session left swapped goes back.
+    public static void Recover() => SaveSwap.SwapOut();
 
-    // Switches saving to mapId's folder and loads it into the scene - the first
-    // time, the folder starts as a copy of the current (real) progress.
-    public static void Enter(string mapId, MonoBehaviour host)
+    // Before a scene change into mapId: saves where we are now, then swaps the
+    // map's save (or a new game) in for the next scene to load.
+    public static void BeginMapScene(string mapId, JObject player, bool asNewGame = false)
     {
-        if (ActiveMapId == mapId) return;
-        if (ActiveMapId != null) SaveAll(FolderFor(ActiveMapId));
-        else if (!SceneIsFresh) SaveAll(RealFolder); // keep Base Game progress up to the moment the map starts
-
+        SaveCurrent();
+        StopGameSaving();
         var folder = FolderFor(mapId);
-        ActiveMapId = mapId;
-        SetGameSaving(false);
-        try
+        if (asNewGame) Delete(mapId);
+        var fresh = player != null && !MatchesStart(folder, player);
+        if (fresh)
         {
-            if (File.Exists(Full(folder) + "/playerdata.txt")) LoadAll(folder);
-            else
-            {
-                Directory.CreateDirectory(Full(folder));
-                SaveAll(folder);
-            }
+            SaveSwap.DeleteFolder(folder);
+            SaveSwap.DeleteFolder(folder + "backup");
         }
-        catch (Exception e) { Debug.LogWarning("[RechargeMaps] map save load failed: " + e.Message); }
-        MapUpgrades.Load(folder);
+        else if (player == null && !SaveSwap.HasSave(folder))
+        {
+            // "Use the player's own save": starts from Base Game progress.
+            SaveSwap.CopyFolder(SaveSwap.Game, folder);
+            SaveSwap.CopyFolder(SaveSwap.GameBackup, folder + "backup");
+        }
+        try { SaveSwap.SwapIn(fresh ? null : folder); }
+        catch (Exception e)
+        {
+            Debug.LogError("[RechargeMaps] couldn't swap in the map's save: " + e.Message);
+            SaveSwap.SwapOut();
+        }
+        _pendingMapId = mapId;
+        _pendingFresh = fresh;
+        Debug.Log("[RechargeMaps] starting '" + mapId + "' " + (fresh ? "as a new game" : "from its save"));
+    }
 
+    public static void OnSceneLoaded(Scene scene, MonoBehaviour host)
+    {
         host.CancelInvoke(nameof(MapManager.MapAutosave));
-        host.InvokeRepeating(nameof(MapManager.MapAutosave), AutosaveSeconds, AutosaveSeconds);
+        _savedForSceneChange = false;
+        // The title scene reloads itself once at startup: the swap waits for the gameplay scene.
+        if (_pendingMapId != null && scene.name == "MainMenu")
+        {
+            StopGameSaving();
+            return;
+        }
+        SaveSwap.SwapOut();
+        ActiveMapId = _pendingMapId;
+        StartedFresh = _pendingMapId != null && _pendingFresh;
+        _pendingMapId = null;
+        if (ActiveMapId != null)
+        {
+            StopGameSaving();
+            host.InvokeRepeating(nameof(MapManager.MapAutosave), AutosaveSeconds, AutosaveSeconds);
+        }
+        else DropWithDeletedSave();
     }
 
-    // A map with its own starting settings begins as a brand-new game: the
-    // real save's playerdata.txt is set aside while the gameplay scene starts,
-    // so the game's Saveloader finds no save and builds a new-game state, then
-    // it's put straight back. Nothing is saved to the real folder meanwhile.
-    private const string HoldSuffix = ".navigator-hold";
-    public static bool SceneIsFresh { get; private set; }
-    private static bool _holding;
-
-    public static bool NeedsFreshStart(string mapId, Newtonsoft.Json.Linq.JObject player)
+    // LoadMap: the map's own extras on top of the save the scene loaded.
+    public static void Enter(string mapId)
     {
-        if (player == null) return false;
-        var folder = Full(FolderFor(mapId));
-        if (!File.Exists(folder + "/playerdata.txt")) return true;
-        try { return !File.Exists(folder + "/navigator-start.json") || File.ReadAllText(folder + "/navigator-start.json") != player.ToString(Newtonsoft.Json.Formatting.None); }
-        catch { return true; }
+        if (ActiveMapId != mapId)
+        {
+            Debug.LogWarning("[RechargeMaps] '" + mapId + "' loaded without its save scene; progress won't be saved");
+            return;
+        }
+        MapUpgrades.Load(FolderFor(mapId));
     }
 
-    public static void PrepareFreshStart(string mapId)
+    // The map's start settings: a new game's marker, checked on the next play.
+    public static void MarkStart(string mapId, JObject player)
     {
-        DeleteFolder(mapId);
-        var real = Full(RealFolder) + "/playerdata.txt";
+        var folder = SaveSwap.Full(FolderFor(mapId));
         try
         {
-            if (File.Exists(real))
-            {
-                if (File.Exists(real + HoldSuffix)) File.Delete(real + HoldSuffix);
-                File.Move(real, real + HoldSuffix);
-            }
-            _holding = true;
+            Directory.CreateDirectory(folder);
+            File.WriteAllText(folder + StartFile, MapUpgrades.StartMarker(player));
         }
-        catch (Exception e) { Debug.LogWarning("[RechargeMaps] couldn't set the real save aside: " + e.Message); }
+        catch (Exception e) { Debug.LogWarning("[RechargeMaps] saving the map's start failed: " + e.Message); }
     }
 
-    // Called on every scene load, at startup and at quit: the real save is always put back.
-    public static void RestoreRealSave(bool sceneJustLoaded)
+    private static bool MatchesStart(string folder, JObject player)
     {
-        SceneIsFresh = sceneJustLoaded && _holding;
-        _holding = false;
-        foreach (var suffix in new[] { "", "hard" })
-        {
-            var real = Full("/Savedata" + suffix) + "/playerdata.txt";
-            try
-            {
-                if (!File.Exists(real + HoldSuffix)) continue;
-                File.Copy(real + HoldSuffix, real, true);
-                File.Delete(real + HoldSuffix);
-            }
-            catch (Exception e) { Debug.LogError("[RechargeMaps] couldn't put the real save back (" + real + HoldSuffix + "): " + e.Message); }
-        }
-        if (SceneIsFresh) SetGameSaving(false);
+        if (!SaveSwap.HasSave(folder)) return false;
+        try { return File.ReadAllText(SaveSwap.Full(folder) + StartFile) == MapUpgrades.StartMarker(player); }
+        catch { return false; }
     }
 
-    public static void DeleteFolder(string mapId)
-    {
-        var path = Full(FolderFor(mapId));
-        try
-        {
-            if (Directory.Exists(path)) Directory.Delete(path, true);
-            if (Directory.Exists(path + "backup")) Directory.Delete(path + "backup", true);
-        }
-        catch (Exception e) { Debug.LogWarning("[RechargeMaps] clearing map save failed: " + e.Message); }
-    }
-
-    // The scene is being replaced (a new Saveloader loads the real save): stop.
-    public static void Forget(MonoBehaviour host)
-    {
-        ActiveMapId = null;
-        host.CancelInvoke(nameof(MapManager.MapAutosave));
-    }
-
-    // The game's autosave rule: not while a course run is in progress.
     public static void Autosave()
     {
         if (ActiveMapId == null) return;
-        var player = UnityEngine.Object.FindFirstObjectByType<Movement>();
+        var player = MapUpgrades.GamePlayer();
         if (player != null && player.courseResetPoint != Vector2.zero) return;
-        SetGameSaving(false); // a Saveloader that woke up since would save to the real folder
+        StopGameSaving();
         SaveAll(FolderFor(ActiveMapId));
     }
 
-    public static void SaveNow()
+    // Every frame: a scene change has started (the pause menu's own save is
+    // off while a map is active), so save the map before the scene goes.
+    public static void Tick()
+    {
+        if (ActiveMapId == null || _savedForSceneChange) return;
+        foreach (var menu in UnityEngine.Object.FindObjectsByType<pauseMenuScript>(FindObjectsSortMode.None))
+        {
+            if (!Reflect.GetField<bool>(menu, "changingSceneNow")) continue;
+            _savedForSceneChange = true;
+            SaveAll(FolderFor(ActiveMapId));
+            return;
+        }
+    }
+
+    public static void Shutdown()
     {
         if (ActiveMapId != null) SaveAll(FolderFor(ActiveMapId));
+        SaveSwap.SwapOut();
     }
 
-    // Deletes a map's whole save: its progress starts again from Base Game's.
-    // If it's the map being played, the scene goes back to the real progress
-    // now and the map's folder starts over from that.
+    // Deletes a map's whole save; the next play starts it over.
     public static void Delete(string mapId)
     {
-        var path = Full(FolderFor(mapId));
-        try { if (Directory.Exists(path)) Directory.Delete(path, true); }
-        catch (Exception e) { Debug.LogWarning("[RechargeMaps] delete map save failed: " + e.Message); }
-        if (ActiveMapId != mapId) return;
-        MapUpgrades.Reset();
-        LoadAll(RealFolder);
-        SaveAll(FolderFor(mapId));
+        SaveSwap.DeleteFolder(FolderFor(mapId));
+        SaveSwap.DeleteFolder(FolderFor(mapId) + "backup");
+        if (ActiveMapId == mapId) ActiveMapId = null;
     }
 
-    // The game's Delete Save wipes a slot's real folder (Savedata or
-    // Savedatahard) and reloads the scene; on that reload, a slot with no real
-    // save left loses its map saves too, so deleting a save deletes all of it.
-    public static void DropWithDeletedSaves()
+    // Where we are now, saved before leaving: the map, or Base Game (its own save).
+    private static void SaveCurrent()
     {
-        foreach (var suffix in new[] { "", "hard" })
-        {
-            if (File.Exists(Full("/Savedata" + suffix) + "/playerdata.txt")) continue;
-            var maps = Full("/SavedataMaps" + suffix);
-            try { if (Directory.Exists(maps)) Directory.Delete(maps, true); }
-            catch (Exception e) { Debug.LogWarning("[RechargeMaps] clearing map saves failed: " + e.Message); }
-        }
+        if (SaveSwap.IsSwapped) return;
+        if (ActiveMapId != null) { SaveAll(FolderFor(ActiveMapId)); return; }
+        if (SceneManager.GetActiveScene().name == "MainMenu") return;
+        var loader = UnityEngine.Object.FindFirstObjectByType<Saveloader>();
+        if (loader != null) loader.manualSave();
+    }
+
+    // The game's Delete Save wipes /Savedata and reloads the scene; a real save
+    // that was there and now isn't takes the map saves with it.
+    private static void DropWithDeletedSave()
+    {
+        if (SaveSwap.HasSave(SaveSwap.Game)) { _realSaveSeen = true; return; }
+        if (!_realSaveSeen) return;
+        _realSaveSeen = false;
+        SaveSwap.DeleteFolder(MapsRoot.TrimEnd('/'));
+        Debug.Log("[RechargeMaps] Base Game save deleted: map saves cleared too");
     }
 
     private static void SaveAll(string folder)
     {
-        Directory.CreateDirectory(Full(folder));
-        Directory.CreateDirectory(Full(folder) + "backup");
-        if (folder != RealFolder) MapUpgrades.Save(folder);
+        try
+        {
+            Directory.CreateDirectory(SaveSwap.Full(folder));
+            Directory.CreateDirectory(SaveSwap.Full(folder) + "backup");
+        }
+        catch (Exception e) { Debug.LogWarning("[RechargeMaps] map save folder: " + e.Message); return; }
+        MapUpgrades.Save(folder);
         foreach (var obj in UnityEngine.Object.FindObjectsByType<SaveableObject>(FindObjectsSortMode.None))
         {
+            // The title scene can stay loaded beside the world with its own copies.
+            if (obj.gameObject.scene.name == "MainMenu") continue;
             try { obj.save(folder); }
             catch (Exception e) { Debug.LogWarning("[RechargeMaps] saving " + obj.GetType().Name + " failed: " + e.Message); }
         }
     }
 
-    private static void LoadAll(string folder)
-    {
-        foreach (var obj in UnityEngine.Object.FindObjectsByType<SaveableObject>(FindObjectsSortMode.None))
-        {
-            try { obj.load(folder); }
-            catch (Exception e) { Debug.LogWarning("[RechargeMaps] loading " + obj.GetType().Name + " failed: " + e.Message); }
-        }
-    }
-
     // Saveloader's own saving: IsSaving gates manualSave, and autosave runs on an Invoke.
-    private static void SetGameSaving(bool on)
+    private static void StopGameSaving()
     {
-        var loader = UnityEngine.Object.FindFirstObjectByType<Saveloader>();
-        if (loader == null) return;
-        Reflect.TrySetField(loader, "IsSaving", on);
-        loader.CancelInvoke("autosave");
-        if (on) loader.InvokeRepeating("autosave", AutosaveSeconds, AutosaveSeconds);
+        foreach (var loader in UnityEngine.Object.FindObjectsByType<Saveloader>(FindObjectsSortMode.None))
+        {
+            Reflect.TrySetField(loader, "IsSaving", false);
+            loader.CancelInvoke("autosave");
+        }
     }
 }

@@ -219,8 +219,9 @@ internal static class MapMenuBuilder
                 _deleteCounters[page.MapId] = counter;
                 if (messages == null || counter >= 4)
                 {
+                    var playing = MapManager.CurrentMapId == page.MapId;
                     MapSaves.Delete(page.MapId);
-                    if (MapManager.CurrentMapId == page.MapId) MapManager.Instance.LoadMap(page.MapId);
+                    if (playing) MapManager.Instance.PlayMap(page.MapId, Menu);
                     _deleteCounters[page.MapId] = 0;
                     PauseMenuHelper.SetButtonLabel(slot, RowLabel(page));
                 }

@@ -1,5 +1,8 @@
+using System;
 using System.Collections.Generic;
+using System.IO;
 using Newtonsoft.Json;
+using UnityEngine;
 
 internal class MapDefinition
 {
@@ -17,6 +20,15 @@ internal class MapDefinition
     [JsonProperty("baseState")] public string BaseState;
     [JsonProperty("player")] public Newtonsoft.Json.Linq.JObject Player;
     [JsonProperty("cameraSize")] public float? CameraSize;
+    // Custom maps: the editor's level-space point their coordinates are measured from.
+    [JsonProperty("levelOrigin")] public float[] LevelOrigin;
+
+    public static MapDefinition Read(string mapId)
+    {
+        var path = Path.Combine(MapPaths.MapsDir, mapId, "map.json");
+        try { return JsonConvert.DeserializeObject<MapDefinition>(File.ReadAllText(path)); }
+        catch (Exception e) { Debug.LogError("[RechargeMaps] couldn't read " + path + ": " + e.Message); return null; }
+    }
 }
 
 internal class MapCustomImage
@@ -36,6 +48,7 @@ internal class MapGroup
     [JsonProperty("spawnX")] public float? SpawnX;
     [JsonProperty("spawnY")] public float? SpawnY;
     [JsonProperty("gates")] public bool Gates = true;
+    [JsonProperty("keepSpawn")] public bool KeepSpawn;
     [JsonProperty("reward")] public MapReward Reward;
     [JsonProperty("objects")] public List<Newtonsoft.Json.Linq.JObject> Objects = new List<Newtonsoft.Json.Linq.JObject>();
     [JsonProperty("courses")] public List<MapCourse> Courses;
