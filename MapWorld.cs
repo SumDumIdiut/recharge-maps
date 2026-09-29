@@ -36,10 +36,13 @@ internal class MapWorld
     public readonly List<(GameObject go, string course)> Links = new List<(GameObject, string)>();
     public readonly List<(GameObject go, JObject cfg)> Teleports = new List<(GameObject, JObject)>();
     public readonly Dictionary<string, Sprite> CustomImages = new Dictionary<string, Sprite>();
+    // Placed objects and free spikes with their place in the editor's stack.
+    public readonly List<(int order, GameObject go)> Stacked = new List<(int, GameObject)>();
 
     private readonly List<Action> _undo = new List<Action>();
     private readonly Dictionary<string, Tilemap> _own = new Dictionary<string, Tilemap>();
     private readonly Dictionary<Grid, Transform> _grids = new Dictionary<Grid, Transform>();
+    private readonly Dictionary<string, Transform> _holders = new Dictionary<string, Transform>();
     private Dictionary<string, Tilemap> _real;
     private Dictionary<string, List<Transform>> _byName;
 
@@ -150,6 +153,25 @@ internal class MapWorld
         if (name.StartsWith("blue")) JoinBlockSwap(go, false);
         else if (name.StartsWith("orange")) JoinBlockSwap(go, true);
         return tilemap;
+    }
+
+    // Where spikes placed off the grid go, one holder per spike tilemap: on its
+    // layer, and for blue / orange ones swapped with the level's blocks.
+    public Transform FreeSpikeHolder(string tilemapName)
+    {
+        if (_holders.TryGetValue(tilemapName, out var held) && held != null) return held;
+        var go = new GameObject("FreeSpikes_" + tilemapName);
+        go.transform.SetParent(Root, false);
+        var real = RealTilemap(tilemapName);
+        if (real != null) go.layer = real.gameObject.layer;
+        var orange = tilemapName.StartsWith("orange");
+        if (orange || tilemapName.StartsWith("blue"))
+        {
+            go.SetActive(real == null || real.gameObject.activeSelf);
+            JoinBlockSwap(go, orange);
+        }
+        _holders[tilemapName] = go.transform;
+        return go.transform;
     }
 
     // Custom maps' tilemaps need a Grid parent with the game's cell size, or

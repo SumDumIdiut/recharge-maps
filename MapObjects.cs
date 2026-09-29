@@ -20,6 +20,7 @@ internal static class MapObjects
         ["coloredGround"] = (w, o) => PaintTile(w, o["color"]?.Value<string>() == "orange" ? "orangeBlocks" : "blueBlocks", o),
         ["tile"] = (w, o) => PaintTile(w, o["tilemap"]?.Value<string>() ?? throw new Exception("tile without a tilemap"), o),
         ["trueSpike"] = SpawnTrueSpike,
+        ["freeSpike"] = SpawnFreeSpike,
         ["clone"] = SpawnClone,
         ["erase"] = LevelOnly(Erase),
         ["hide"] = LevelOnly(Hide),
@@ -41,6 +42,12 @@ internal static class MapObjects
 
     // Returns how many objects were built. One bad object never stops the rest.
     public static int Build(MapWorld w)
+    {
+        try { return BuildAll(w); }
+        finally { MapLayering.Apply(w); }
+    }
+
+    private static int BuildAll(MapWorld w)
     {
         LoadCustomImages(w);
         int done = 0;
@@ -127,6 +134,49 @@ internal static class MapObjects
             .Select(p => (Vector2)tilemap.transform.InverseTransformPoint(centre + turn * (Vector3)p)).ToArray();
     }
 
+    // A spike placed off the grid: the spike tile's sprite, turned as the tile
+    // would be, with its hitbox shapes and the game's own spikeScript.
+    private static void SpawnFreeSpike(MapWorld w, JObject obj)
+    {
+        var tilemapName = obj["tilemap"]?.Value<string>() ?? "Spikes";
+        var tile = MapTiles.Resolve(tilemapName, obj) as Tile;
+        if (tile == null || tile.sprite == null) throw new Exception("no spike tile '" + obj["tileName"] + "'");
+        var go = new GameObject("FreeSpike");
+        var holder = w.FreeSpikeHolder(tilemapName);
+        go.layer = holder.gameObject.layer;
+        go.transform.SetParent(holder, false);
+        go.transform.position = w.Point(obj);
+
+        var art = new GameObject("Sprite");
+        art.transform.SetParent(go.transform, false);
+        var m = MapWorld.MatrixOf(obj) ?? Matrix4x4.identity;
+        var sx = Mathf.Sqrt(m.m00 * m.m00 + m.m10 * m.m10);
+        var det = m.m00 * m.m11 - m.m01 * m.m10;
+        art.transform.localRotation = Quaternion.Euler(0f, 0f, Mathf.Atan2(m.m10, m.m00) * Mathf.Rad2Deg);
+        art.transform.localScale = new Vector3(sx, sx > 0f ? det / sx : 1f, 1f);
+        var sr = art.AddComponent<SpriteRenderer>();
+        sr.sprite = tile.sprite;
+        var real = w.RealTilemap(tilemapName);
+        var rend = real != null ? real.GetComponent<TilemapRenderer>() : null;
+        if (rend != null) { sr.sortingLayerID = rend.sortingLayerID; sr.sortingOrder = rend.sortingOrder; }
+        // A tilemap's material ignores colour on a sprite; a sprite one doesn't.
+        var lit = RealAssetPalette.Get<SpringScript>()?.GetComponentInChildren<SpriteRenderer>(true);
+        if (lit != null) sr.sharedMaterial = lit.sharedMaterial;
+        if (obj["color"] is JArray c && c.Count >= 3) sr.color = new Color(c[0].Value<float>(), c[1].Value<float>(), c[2].Value<float>(), 1f);
+
+        if (obj["shape"] is JArray shape)
+            foreach (var poly in shape.OfType<JArray>())
+            {
+                var points = poly.OfType<JArray>().Where(p => p.Count == 2).Select(p => new Vector2(p[0].Value<float>(), p[1].Value<float>())).ToArray();
+                if (points.Length < 3) continue;
+                var col = go.AddComponent<PolygonCollider2D>();
+                col.isTrigger = true;
+                col.points = points;
+            }
+        go.AddComponent<spikeScript>();
+        if (obj["order"] != null) w.Stacked.Add((obj["order"].Value<int>(), go));
+    }
+
     // ---- the level's own objects ----
 
     // A copy of a real scene object (upgrade box, teleporter, zip mover...) at
@@ -145,6 +195,7 @@ internal static class MapObjects
             clone.transform.position = new Vector3(at.x, at.y, at.z - 0.01f * obj["order"].Value<int>());
         }
         clone.SetActive(true);
+        if (obj["order"] != null) w.Stacked.Add((obj["order"].Value<int>(), clone));
         var course = obj["course"]?.Value<string>();
         if (!string.IsNullOrEmpty(course)) w.Links.Add((clone, course));
         if (obj["teleport"] is JObject teleport) w.Teleports.Add((clone, teleport));
