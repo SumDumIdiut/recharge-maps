@@ -138,6 +138,12 @@ internal static class MapObjects
         var source = w.FindSceneObject(path, MapWorld.SourcePoint(obj)) ?? throw new Exception("no scene object at '" + path + "' to copy");
         var clone = UnityEngine.Object.Instantiate(source.gameObject, w.Point(obj), source.rotation, w.Root);
         clone.name = source.name;
+        // The editor's layering: among sprites drawn at the same level, nearer the camera is in front.
+        if (obj["order"] != null)
+        {
+            var at = clone.transform.position;
+            clone.transform.position = new Vector3(at.x, at.y, at.z - 0.01f * obj["order"].Value<int>());
+        }
         clone.SetActive(true);
         var course = obj["course"]?.Value<string>();
         if (!string.IsNullOrEmpty(course)) w.Links.Add((clone, course));

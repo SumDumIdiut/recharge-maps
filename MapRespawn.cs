@@ -19,6 +19,8 @@ internal static class MapRespawn
     private static bool _wasDead;
     private static bool? _heldSetting;
     private static Vector2? _safeRespawn;
+    // A level checkpoint touched mid-run moved the respawn point too; put it back.
+    private static bool _undoRespawn;
 
     public static void Reset()
     {
@@ -27,12 +29,15 @@ internal static class MapRespawn
         _wasDead = false;
         _heldSetting = null;
         _safeRespawn = null;
+        _undoRespawn = false;
     }
 
     public static void Tick(Movement mv)
     {
         if (mv == null) return;
         var dead = Reflect.GetField<bool>(mv, "isDead");
+        if (_undoRespawn && _safeRespawn != null) mv.respawnPoint = _safeRespawn.Value;
+        _undoRespawn = false;
         GuardRespawnPoint(mv);
         // A run ends at its end gate (death doesn't end it).
         if (_runCourse != null && !Tracking(_runCourse)) { _runCourse = null; _runCheckpoint = null; }
@@ -74,6 +79,16 @@ internal static class MapRespawn
         _runCheckpoint = level;
     }
 
+    // One of the level's own checkpoints in a course, touched during a run of
+    // that course: the run carries on from it, and the respawn point it also
+    // moved (it's a normal checkpoint the rest of the time) goes back.
+    public static void LevelCourseCheckpointTouched(courseScript owner, Vector3 at, Movement mv)
+    {
+        if (owner == null || !Tracking(owner)) return;
+        _undoRespawn = true;
+        CourseCheckpointTouched(owner, at, mv);
+    }
+
     // Turns the level checkpoint(s) in `go` into course checkpoints; returns the undo.
     public static Action MakeCourseCheckpoint(GameObject go)
     {
@@ -97,14 +112,16 @@ internal static class MapRespawn
         };
     }
 
-    // The level's own course checkpoints behave as course checkpoints while a map is loaded.
-    public static void ConvertLevelCourseCheckpoints(MapWorld w)
+    // The level's own checkpoints in courses stay normal checkpoints (some are
+    // a course's entrance), and also count for runs of their course.
+    public static void WatchLevelCourseCheckpoints(MapWorld w)
     {
         foreach (var cp in Resources.FindObjectsOfTypeAll<checkpointScript>())
         {
             if (cp == null || !cp.gameObject.scene.IsValid() || MapWorld.IsMapObject(cp.transform)) continue;
-            if (!RealAssetPalette.GetPath(cp.transform).StartsWith("Courses/")) continue;
-            w.OnUnload(MakeCourseCheckpoint(cp.gameObject));
+            if (!RealAssetPalette.GetPath(cp.transform).StartsWith("Courses/") || cp.GetComponent<MapRunCheckpoint>() != null) continue;
+            var watch = cp.gameObject.AddComponent<MapRunCheckpoint>();
+            w.OnUnload(() => { if (watch != null) UnityEngine.Object.Destroy(watch); });
         }
     }
 
@@ -167,5 +184,16 @@ internal class MapCourseCheckpoint : MonoBehaviour
         var mv = collision.gameObject.GetComponent<Movement>();
         if (mv == null) return;
         MapRespawn.CourseCheckpointTouched(GetComponentInParent<courseScript>(), transform.position, mv);
+    }
+}
+
+// On one of the level's course checkpoints: see WatchLevelCourseCheckpoints.
+internal class MapRunCheckpoint : MonoBehaviour
+{
+    private void OnTriggerEnter2D(Collider2D collision)
+    {
+        if (!collision.gameObject.CompareTag("Player")) return;
+        var mv = collision.gameObject.GetComponent<Movement>();
+        if (mv != null) MapRespawn.LevelCourseCheckpointTouched(GetComponentInParent<courseScript>(), transform.position, mv);
     }
 }

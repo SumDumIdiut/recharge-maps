@@ -21,6 +21,7 @@ internal static class MapCourses
             var course = CreateCourse(w, i == 0 ? null : spec.Id ?? "course" + i);
             if (course == null) continue;
             SpawnGates(w, spec, course);
+            PlaceScreen(w, spec, course);
             byId[spec.Id ?? ""] = course;
         }
 
@@ -77,8 +78,11 @@ internal static class MapCourses
         var go = UnityEngine.Object.Instantiate(template.gameObject, MapWorld.Live(w.Origin), Quaternion.identity, w.Root);
         go.name = "Course" + (extraId != null ? "_" + extraId : "");
         go.SetActive(true);
+        // Course 1's content goes; its screen (the Canvas board) stays for PlaceScreen.
         var disableBits = go.transform.Find("DisableBits");
-        if (disableBits != null) foreach (Transform child in disableBits) UnityEngine.Object.Destroy(child.gameObject);
+        if (disableBits != null)
+            foreach (Transform child in disableBits)
+                if (child.name != "Canvas") UnityEngine.Object.Destroy(child.gameObject);
 
         var course = go.GetComponent<courseScript>();
         course.courseNumber = StableCourseNumber(extraId == null ? w.MapId : w.MapId + "#" + extraId);
@@ -93,6 +97,37 @@ internal static class MapCourses
         var local = go.GetComponentInChildren<localUpgrades>(true);
         if (local != null) foreach (Transform box in local.transform) box.gameObject.SetActive(false);
         return course;
+    }
+
+    // The course's screen (the board with its reward, best time and clones),
+    // moved so the board is centred where the editor put it. Its "ONE" title
+    // belongs to course 1's wall art, so it goes. Maps without one don't show it.
+    private static void PlaceScreen(MapWorld w, MapCourse spec, courseScript course)
+    {
+        var bits = course.transform.Find("DisableBits");
+        var canvas = bits != null ? bits.Find("Canvas") : null;
+        if (spec.ScreenX == null || spec.ScreenY == null || canvas == null)
+        {
+            if (canvas != null) canvas.gameObject.SetActive(false);
+            return;
+        }
+        TMPro.TMP_Text title = null;
+        var board = Vector3.zero;
+        int n = 0;
+        foreach (var text in canvas.GetComponentsInChildren<TMPro.TMP_Text>(true))
+        {
+            if (string.IsNullOrWhiteSpace(text.text)) continue;
+            if (text.text.Trim() == "ONE") { title = text; continue; }
+            board += text.transform.position;
+            n++;
+        }
+        if (n > 0)
+        {
+            var delta = MapWorld.Live(w.LevelPoint(spec.ScreenX.Value, spec.ScreenY.Value)) - board / n;
+            delta.z = 0f;
+            canvas.position += delta;
+        }
+        if (title != null) title.gameObject.SetActive(false);
     }
 
     private static void SpawnGates(MapWorld w, MapCourse spec, courseScript course)

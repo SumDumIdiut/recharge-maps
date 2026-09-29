@@ -75,6 +75,7 @@ internal static class MapUpgrades
         mv.omniDashUnlocked = player["omniDash"]?.Value<bool>() ?? false;
         globalStats.globalUpgradeDict[globalStats.globalUpgradeSet.zipMoversUnlocked] = (player["zipMovers"]?.Value<bool>() ?? true) ? 1.0 : 0.0;
         globalStats.globalUpgradeDict[globalStats.globalUpgradeSet.unlockJiggleDrops] = (player["refreshers"]?.Value<bool>() ?? true) ? 1.0 : 0.0;
+        globalStats.globalUpgradeDict[globalStats.globalUpgradeSet.unlockTeleporters] = (player["teleporters"]?.Value<bool>() ?? true) ? 1.0 : 0.0;
         globalStats.currencyLookup[globalStats.Currencies.Cash] = Math.Max(0.0, player["cash"]?.Value<double>() ?? 0.0);
         Reset();
         MapSaves.MarkStart(mapId, player);
@@ -95,7 +96,7 @@ internal static class MapUpgrades
         var player = def?.Player;
         if (zips && (player?["zipMovers"]?.Value<bool>() ?? true)) Unlock(globalStats.globalUpgradeSet.zipMoversUnlocked);
         if (refreshers && (player?["refreshers"]?.Value<bool>() ?? true)) Unlock(globalStats.globalUpgradeSet.unlockJiggleDrops);
-        if (teleporters) Unlock(globalStats.globalUpgradeSet.unlockTeleporters);
+        if (teleporters && (player?["teleporters"]?.Value<bool>() ?? true)) Unlock(globalStats.globalUpgradeSet.unlockTeleporters);
     }
 
     private static void Unlock(globalStats.globalUpgradeSet upgrade)

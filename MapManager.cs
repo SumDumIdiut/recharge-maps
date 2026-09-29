@@ -107,7 +107,7 @@ internal class MapManager : MonoBehaviour
             if (w.Overlay) w.ApplyBaseState(def.BaseState);
             var built = MapObjects.Build(w);
             MapCourses.Build(w);
-            MapRespawn.ConvertLevelCourseCheckpoints(w);
+            MapRespawn.WatchLevelCourseCheckpoints(w);
             MapSpawn.Place(w, this);
             if (newGame && w.Overlay) StartCoroutine(ShowTutorialGlyphs());
             Debug.Log("[RechargeMaps] loaded " + (w.Overlay ? "overlay" : "custom") + " map '" + mapId + "' (" + built + "/" + w.Group.Objects.Count + " objects)" + (newGame ? " as a new game" : ""));

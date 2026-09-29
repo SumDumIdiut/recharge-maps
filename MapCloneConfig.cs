@@ -70,6 +70,39 @@ internal static class MapCloneConfig
         MapUpgrades.PrepareRefresher(clone);
     }
 
+    private static void BuildPlatform(PlatformMover mover, JArray rects)
+    {
+        var sr = mover.GetComponent<SpriteRenderer>();
+        var box = mover.GetComponent<BoxCollider2D>();
+        if (sr == null) return;
+        var scale = mover.transform.lossyScale;
+        // The game's collider sits a little inside the sprite; keep that margin.
+        var fit = box != null && sr.size.x > 0f && sr.size.y > 0f ? new Vector2(box.size.x / sr.size.x, box.size.y / sr.size.y) : Vector2.one;
+        int n = 0;
+        foreach (var token in rects)
+        {
+            if (!(token is JArray r) || r.Count != 4) continue;
+            var size = new Vector2(r[2].Value<float>() / scale.x, r[3].Value<float>() / scale.y);
+            var piece = new GameObject("PlatformTiles_" + n++);
+            piece.layer = mover.gameObject.layer;
+            piece.tag = mover.gameObject.tag;
+            piece.transform.SetParent(mover.transform, false);
+            piece.transform.localPosition = new Vector3(r[0].Value<float>() / scale.x, r[1].Value<float>() / scale.y, 0f);
+            var art = piece.AddComponent<SpriteRenderer>();
+            art.sprite = sr.sprite;
+            art.sharedMaterial = sr.sharedMaterial;
+            art.drawMode = sr.drawMode == SpriteDrawMode.Simple ? SpriteDrawMode.Sliced : sr.drawMode;
+            art.size = size;
+            art.color = sr.color;
+            art.sortingLayerID = sr.sortingLayerID;
+            art.sortingOrder = sr.sortingOrder;
+            var col = piece.AddComponent<BoxCollider2D>();
+            col.size = Vector2.Scale(size, fit);
+        }
+        sr.enabled = false;
+        if (box != null) box.enabled = false;
+    }
+
     private static void ApplyZip(GameObject clone, JObject zip)
     {
         var mover = clone.GetComponentInChildren<PlatformMover>(true);
@@ -90,6 +123,23 @@ internal static class MapCloneConfig
             var first = positions.GetValue(0);
             if (zip["backTime"] != null) time.SetValue(first, zip["backTime"].Value<float>());
             positions.SetValue(first, 0);
+            if (zip["auto"]?.Value<bool>() == true)
+            {
+                // Moving on its own: every phase starts the next once its pause is
+                // over, and touching it no longer matters.
+                var wait = elemType.GetField("waitOnPhaseEnd");
+                for (int i = 0; i < positions.Length; i++)
+                {
+                    var phase = positions.GetValue(i);
+                    elemType.GetField("autoStartNextPhase").SetValue(phase, true);
+                    elemType.GetField("nextPhaseOnEnter").SetValue(phase, false);
+                    elemType.GetField("nextPhaseOnExit").SetValue(phase, false);
+                    if (i == positions.Length - 1) wait.SetValue(phase, zip["pauseReturn"]?.Value<float>() ?? 0.5f);
+                    if (i == 0) wait.SetValue(phase, zip["pauseMove"]?.Value<float>() ?? 1f);
+                    positions.SetValue(phase, i);
+                }
+                mover.gameObject.AddComponent<MapZipAutoStart>().FirstPause = zip["pauseMove"]?.Value<float>() ?? 1f;
+            }
             posField.SetValue(mover, positions);
         }
         // The track and its end node follow the new path.
@@ -105,6 +155,14 @@ internal static class MapCloneConfig
                 if (sr != null) sr.size = new Vector2(len + 30f, sr.size.y);
             }
             else if (tr.name == "ZipNode (1)") tr.localPosition = end - dir * 5f;
+        }
+        // A platform built from grate tiles: rectangles of the game's own grate
+        // hung off the moving part, each with its collider. Colliders on a child
+        // belong to the moving part's body, so the game carries the player on them.
+        if (zip["rects"] is JArray rects && rects.Count > 0)
+        {
+            BuildPlatform(mover, rects);
+            return;
         }
         // The platform's size: the game shapes it to its track (tall across a
         // level one, flat across an upright or diagonal one) rather than turning it.
@@ -132,5 +190,26 @@ internal static class MapCloneConfig
                 if (box != null && old > 0f) box.size = new Vector2(box.size.x * width / old, box.size.y);
             }
         }
+    }
+}
+
+// Starts a self-moving zip mover's loop. The game only ever starts a zip
+// mover's first move from a touch, and resets it whenever its zone is
+// switched off and on again, so this starts it on every enable.
+internal class MapZipAutoStart : MonoBehaviour
+{
+    public float FirstPause = 1f;
+    private static readonly MethodInfo Advance = typeof(PlatformMover).GetMethod("IE_AdvanceToNextState", BindingFlags.Instance | BindingFlags.NonPublic);
+
+    private void OnEnable() => StartCoroutine(Kick());
+
+    private System.Collections.IEnumerator Kick()
+    {
+        // PlatformMover.OnEnable jumps back to its start over a couple of physics steps.
+        for (int i = 0; i < 3; i++) yield return new WaitForFixedUpdate();
+        if (FirstPause > 0f) yield return new WaitForSeconds(FirstPause);
+        var mover = GetComponent<PlatformMover>();
+        if (mover == null || Advance == null || Recharge.ModApi.Reflect.GetField<bool>(mover, "isPhaseChangeInProgess")) yield break;
+        mover.StartCoroutine((System.Collections.IEnumerator)Advance.Invoke(mover, null));
     }
 }

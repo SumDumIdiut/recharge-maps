@@ -61,6 +61,9 @@ internal class MapCourse
     [JsonProperty("startY")] public float StartY;
     [JsonProperty("endX")] public float EndX;
     [JsonProperty("endY")] public float EndY;
+    // Where the course's screen (reward, best time, clones) sits: the centre of its board.
+    [JsonProperty("screenX")] public float? ScreenX;
+    [JsonProperty("screenY")] public float? ScreenY;
     [JsonProperty("reward")] public MapReward Reward;
 }
 
