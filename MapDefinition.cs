@@ -1,5 +1,8 @@
+using System;
 using System.Collections.Generic;
+using System.IO;
 using Newtonsoft.Json;
+using UnityEngine;
 
 internal class MapDefinition
 {
@@ -9,6 +12,31 @@ internal class MapDefinition
     [JsonProperty("images")] public List<string> Images = new List<string>();
     [JsonProperty("groups")] public List<MapGroup> Groups = new List<MapGroup>();
     [JsonProperty("customImages")] public List<MapCustomImage> CustomImages = new List<MapCustomImage>();
+    // Overlay maps are edits to the real base-game world at its own coordinates
+    // (made on top of the imported base map); others are self-contained and
+    // spawn in the far-away pocket. baseState picks area 1's look for overlays:
+    // "start" (start of the game) or "overgrown" (after the breaker trips).
+    [JsonProperty("overlay")] public bool Overlay;
+    [JsonProperty("baseState")] public string BaseState;
+    [JsonProperty("player")] public Newtonsoft.Json.Linq.JObject Player;
+    [JsonProperty("cameraSize")] public float? CameraSize;
+    // The map's music ("level", "none", "game:<track>", "asset:<file>") and
+    // background (null / "level", or { image, parallax, scale }); see MapMedia.
+    [JsonProperty("music")] public Newtonsoft.Json.Linq.JToken Music;
+    [JsonProperty("background")] public Newtonsoft.Json.Linq.JToken Background;
+    // Edits in the overgrown stages are kept per area-1 state: the game's own state picks them.
+    [JsonProperty("stages")] public bool Stages;
+    // Custom maps: the editor's level-space point their coordinates are measured from.
+    [JsonProperty("levelOrigin")] public float[] LevelOrigin;
+    // Groups (see MapGroups) that start switched off until a trigger shows them.
+    [JsonProperty("hiddenGroups")] public List<string> HiddenGroups;
+
+    public static MapDefinition Read(string mapId)
+    {
+        var path = Path.Combine(MapPaths.MapsDir, mapId, "map.json");
+        try { return JsonConvert.DeserializeObject<MapDefinition>(File.ReadAllText(path)); }
+        catch (Exception e) { Debug.LogError("[RechargeMaps] couldn't read " + path + ": " + e.Message); return null; }
+    }
 }
 
 internal class MapCustomImage
@@ -23,8 +51,36 @@ internal class MapGroup
     [JsonProperty("startY")] public float StartY;
     [JsonProperty("endX")] public float EndX;
     [JsonProperty("endY")] public float EndY;
+    // Optional: where the player spawns (defaults to the start gate), and
+    // whether the map has start/end gates at all - a free-play map has none.
+    [JsonProperty("spawnX")] public float? SpawnX;
+    [JsonProperty("spawnY")] public float? SpawnY;
+    [JsonProperty("gates")] public bool Gates = true;
+    [JsonProperty("keepSpawn")] public bool KeepSpawn;
     [JsonProperty("reward")] public MapReward Reward;
     [JsonProperty("objects")] public List<Newtonsoft.Json.Linq.JObject> Objects = new List<Newtonsoft.Json.Linq.JObject>();
+    [JsonProperty("courses")] public List<MapCourse> Courses;
+    // More spawns, cycled with Q / E in game (after the main one).
+    [JsonProperty("spawns")] public List<MapPoint> Spawns;
+}
+
+internal class MapPoint
+{
+    [JsonProperty("x")] public float X;
+    [JsonProperty("y")] public float Y;
+}
+
+internal class MapCourse
+{
+    [JsonProperty("id")] public string Id;
+    [JsonProperty("startX")] public float StartX;
+    [JsonProperty("startY")] public float StartY;
+    [JsonProperty("endX")] public float EndX;
+    [JsonProperty("endY")] public float EndY;
+    // Where the course's screen (reward, best time, clones) sits: the centre of its board.
+    [JsonProperty("screenX")] public float? ScreenX;
+    [JsonProperty("screenY")] public float? ScreenY;
+    [JsonProperty("reward")] public MapReward Reward;
 }
 
 internal class MapReward

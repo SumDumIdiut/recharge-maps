@@ -17,7 +17,13 @@ internal static class RealAssetPalette
     private static readonly Dictionary<Type, Component> Templates = new Dictionary<Type, Component>();
     private static readonly Dictionary<string, Tilemap> TilemapTemplates = new Dictionary<string, Tilemap>();
     private static readonly Dictionary<string, List<TileBase>> TilePalettes = new Dictionary<string, List<TileBase>>();
-    private static readonly string[] TilemapNames = { "ground", "blueBlocks", "orangeBlocks" };
+    // Every tilemap a map's "tile" objects may paint onto (the deadly ones carry
+    // spikeScript), besides the plain ground/coloured-ground types.
+    private static readonly string[] TilemapNames =
+    {
+        "ground", "blueBlocks", "orangeBlocks",
+        "Spikes", "hiddenSpikes", "backgroundSpikes1", "backgroundSpikes2", "OvergrowthSpikes", "blueSpikes", "orangeSpikes",
+    };
     private static GameObject _holder;
 
     public static Vector3 GroundCellSize { get; private set; } = new Vector3(32f, 32f, 1f);
@@ -152,6 +158,36 @@ internal static class RealAssetPalette
         }
     }
 
+    // Any other tilemap a map uses (decoration, background, moss...): its tiles
+    // and a cleared template, scanned the first time it's asked for - from the
+    // tilemap's used-tile list, so even the huge background layers are quick.
+    private static readonly HashSet<string> Missing = new HashSet<string>();
+    private static void EnsurePalette(string name)
+    {
+        if (string.IsNullOrEmpty(name) || TilePalettes.ContainsKey(name) || Missing.Contains(name)) return;
+        Tilemap found = null;
+        foreach (var tm in Resources.FindObjectsOfTypeAll<Tilemap>())
+        {
+            if (tm.gameObject.scene.IsValid() && MatchesTilemap(tm.gameObject.name, name)) { found = tm; break; }
+        }
+        if (found == null) { Missing.Add(name); return; }
+        var used = new TileBase[found.GetUsedTilesCount()];
+        found.GetUsedTilesNonAlloc(used);
+        TilePalettes[name] = used.Where(t => t != null).ToList();
+        var clone = UnityEngine.Object.Instantiate(found.gameObject, Holder.transform);
+        clone.name = name + "_TilemapTemplate";
+        var cloneTilemap = clone.GetComponent<Tilemap>();
+        cloneTilemap.ClearAllTiles();
+        TilemapTemplates[name] = cloneTilemap;
+    }
+
+    // The demo's main ground tilemap is "ground"; the full game's is
+    // "new awesome nikki ground". Maps always ask for "ground".
+    private static bool MatchesTilemap(string sceneName, string wanted)
+    {
+        return sceneName == wanted || (wanted == "ground" && sceneName == "new awesome nikki ground");
+    }
+
     private static void ScanTilemaps()
     {
         foreach (var name in TilemapNames)
@@ -161,7 +197,7 @@ internal static class RealAssetPalette
             Tilemap found = null;
             foreach (var tm in Resources.FindObjectsOfTypeAll<Tilemap>())
             {
-                if (tm.gameObject.scene.IsValid() && tm.gameObject.name == name) { found = tm; break; }
+                if (tm.gameObject.scene.IsValid() && MatchesTilemap(tm.gameObject.name, name)) { found = tm; break; }
             }
             if (found == null) continue;
 
@@ -410,6 +446,7 @@ internal static class RealAssetPalette
 
     public static Tilemap GetTilemapTemplate(string name)
     {
+        EnsurePalette(name);
         return TilemapTemplates.TryGetValue(name, out var tm) ? tm : null;
     }
 
@@ -421,8 +458,64 @@ internal static class RealAssetPalette
 
     public static TileBase GetTileByName(string tilemapName, string tileName)
     {
+        EnsurePalette(tilemapName);
         if (!TilePalettes.TryGetValue(tilemapName, out var tiles)) return null;
-        return tiles.FirstOrDefault(t => t.name == tileName);
+        return tiles.FirstOrDefault(t => t.name == tileName) ?? LooseTile(tileName);
+    }
+
+    // A tile the level never places (a strip end, an Asset_Sheet plate): the
+    // game's own Tile asset if it has one, else a plain tile made from the
+    // tileset sprite of that name - from the game's sprite atlas, which holds
+    // every tileset sprite even when nothing in the level uses it.
+    private static readonly Dictionary<string, TileBase> LooseTiles = new Dictionary<string, TileBase>();
+    private static Dictionary<string, TileBase> _tilesByName;
+    private static Dictionary<string, Sprite> _spritesByName;
+    // Any of the game's sprites by name, loaded or still packed in its atlas.
+    public static Sprite SpriteByName(string name)
+    {
+        if (string.IsNullOrEmpty(name)) return null;
+        LooseTile("\u0000");
+        if (_spritesByName.TryGetValue(name, out var sprite) && sprite != null) return sprite;
+        foreach (var atlas in Resources.FindObjectsOfTypeAll<UnityEngine.U2D.SpriteAtlas>())
+        {
+            sprite = atlas != null ? atlas.GetSprite(name) : null;
+            if (sprite != null) { sprite.name = name; _spritesByName[name] = sprite; return sprite; }
+        }
+        return null;
+    }
+
+    private static TileBase LooseTile(string tileName)
+    {
+        if (string.IsNullOrEmpty(tileName)) return null;
+        if (LooseTiles.TryGetValue(tileName, out var cached) && cached != null) return cached;
+        if (_tilesByName == null)
+        {
+            _tilesByName = new Dictionary<string, TileBase>();
+            foreach (var t in Resources.FindObjectsOfTypeAll<TileBase>()) if (t != null && !_tilesByName.ContainsKey(t.name)) _tilesByName[t.name] = t;
+            _spritesByName = new Dictionary<string, Sprite>();
+            foreach (var sp in Resources.FindObjectsOfTypeAll<Sprite>()) if (sp != null && !_spritesByName.ContainsKey(sp.name)) _spritesByName[sp.name] = sp;
+        }
+        _tilesByName.TryGetValue(tileName, out var found);
+        if (found == null)
+        {
+            _spritesByName.TryGetValue(tileName, out var sprite);
+            if (sprite == null)
+                foreach (var atlas in Resources.FindObjectsOfTypeAll<UnityEngine.U2D.SpriteAtlas>())
+                {
+                    sprite = atlas != null ? atlas.GetSprite(tileName) : null;
+                    if (sprite != null) { sprite.name = tileName; _spritesByName[tileName] = sprite; break; }
+                }
+            if (sprite != null)
+            {
+                var tile = ScriptableObject.CreateInstance<Tile>();
+                tile.name = tileName;
+                tile.sprite = sprite;
+                tile.colliderType = Tile.ColliderType.Grid;
+                found = tile;
+            }
+        }
+        LooseTiles[tileName] = found;
+        return found;
     }
 
     public static T Spawn<T>(Vector3 worldPos, Quaternion rotation, Transform parent) where T : Component
