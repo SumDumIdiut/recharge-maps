@@ -22,10 +22,17 @@ internal static class MapObjects
         ["trueSpike"] = SpawnTrueSpike,
         ["freeSpike"] = SpawnFreeSpike,
         ["sign"] = SpawnSign,
+        ["trigger"] = SpawnTrigger,
+        ["customSprite"] = SpawnCustomSprite,
+        ["gameSprite"] = SpawnGameSprite,
         ["clone"] = SpawnClone,
         ["erase"] = LevelOnly(Erase),
         ["hide"] = LevelOnly(Hide),
         ["modify"] = LevelOnly(Modify),
+        ["move"] = LevelOnly(Move),
+        ["transform"] = LevelOnly(TransformLevel),
+        ["order"] = LevelOnly(OrderLevel),
+        ["group"] = LevelOnly(GroupLevel),
         // Older map files.
         ["spike"] = (w, o) => SpawnTemplate<spikeScript>(w, o),
         ["checkpoint"] = (w, o) => SpawnTemplate<checkpointScript>(w, o),
@@ -45,14 +52,56 @@ internal static class MapObjects
     public static int Build(MapWorld w)
     {
         try { return BuildAll(w); }
-        finally { MapLayering.Apply(w); }
+        finally
+        {
+            MapLayering.Apply(w);
+            try { MapDoors.Apply(w); }
+            catch (Exception e) { Debug.LogWarning("[RechargeMaps] linking doors failed: " + e.Message); }
+            try { MapLongFalls.Apply(w); }
+            catch (Exception e) { Debug.LogWarning("[RechargeMaps] long-fall zones failed: " + e.Message); }
+        }
     }
 
     private static int BuildAll(MapWorld w)
     {
+        try { return BuildEach(w); }
+        finally { w.FlushPaint(); MapGroups.HideStarting(w); }
+    }
+
+    // The overgrown stages' edits wait for MapStages, which builds the set for the level's state.
+    private static int BuildEach(MapWorld w)
+    {
+        var shared = new List<JObject>();
+        foreach (var obj in w.Group.Objects)
+        {
+            var state = obj["state"]?.Value<string>();
+            if (state == null) { shared.Add(obj); continue; }
+            if (!w.StageObjects.TryGetValue(state, out var list)) w.StageObjects[state] = list = new List<JObject>();
+            list.Add(obj);
+        }
+        return BuildObjects(w, shared);
+    }
+
+    public static int BuildStage(MapWorld w, string state)
+    {
+        if (!w.StageObjects.TryGetValue(state, out var list)) return 0;
+        w.BeginStage(state);
+        try
+        {
+            var built = BuildObjects(w, list);
+            w.FlushPaint();
+            MapGroups.HideStarting(w);
+            MapLayering.Apply(w);
+            return built;
+        }
+        finally { w.EndStage(); }
+    }
+
+    private static int BuildObjects(MapWorld w, List<JObject> objects)
+    {
         LoadCustomImages(w);
         int done = 0;
-        foreach (var obj in w.Group.Objects)
+        foreach (var obj in objects)
         {
             var type = obj["type"]?.Value<string>() ?? "";
             try
@@ -77,8 +126,26 @@ internal static class MapObjects
         // A level tilemap that's switched off in this map's state (the overgrowth's
         // thorn vines at the start of the game): paint the map's own copy, which is on.
         if (w.Overlay && !tilemap.gameObject.activeInHierarchy) tilemap = w.OwnTilemap(tilemapName + " (map)", tilemapName);
+        tilemap = Grouped(w, tilemap, tilemapName, obj);
         var tile = TileFor(tilemapName, obj) ?? throw new Exception("no tile '" + (obj["tileName"] ?? obj["tileIndex"]) + "' for '" + tilemapName + "'");
         w.Paint(tilemap, w.CellOf(tilemap, obj), tile, MapWorld.MatrixOf(obj));
+    }
+
+    // A grouped tile goes on the group's own copy of its tilemap, so the group can switch it off or move it.
+    private static Tilemap Grouped(MapWorld w, Tilemap tilemap, string tilemapName, JObject obj)
+    {
+        var g = MapGroups.Of(obj);
+        if (g == null) return tilemap;
+        var own = w.OwnTilemap(tilemap.name + " #" + g, tilemapName == TrueSpikes ? "Spikes" : tilemapName);
+        if (tilemapName == TrueSpikes || tilemap.name.EndsWith(" (map)"))
+        {
+            own.color = tilemap.color;
+            var from = tilemap.GetComponent<TilemapRenderer>();
+            var to = own.GetComponent<TilemapRenderer>();
+            if (from != null && to != null) to.sharedMaterial = from.sharedMaterial;
+        }
+        MapGroups.Add(w, obj, own.gameObject);
+        return own;
     }
 
     private static TileBase TileFor(string tilemapName, JObject obj)
@@ -124,6 +191,7 @@ internal static class MapObjects
             var rend = tilemap.GetComponent<TilemapRenderer>();
             if (lit != null && rend != null) rend.sharedMaterial = lit.sharedMaterial;
         }
+        tilemap = Grouped(w, tilemap, TrueSpikes, obj);
         var tile = MapTiles.Resolve("Spikes", obj) ?? throw new Exception("no spike tile '" + obj["tileName"] + "'");
         var cell = w.CellOf(tilemap, obj);
         var turn = MapWorld.Rot(obj);
@@ -178,7 +246,99 @@ internal static class MapObjects
                 col.points = points;
             }
         go.AddComponent<spikeScript>();
+        MapGroups.Add(w, obj, go);
         if (obj["order"] != null) w.Stacked.Add((obj["order"].Value<int>(), go));
+        if (obj["behind"]?.Value<bool>() == true) (obj["depth"]?.Value<int>() == 2 ? w.BehindWalls : w.Behind).Add(go);
+    }
+
+    // A zone acting as the player walks in: switching the music / background,
+    // a group, or doing something to the player. A kill zone is the game's own spikeScript.
+    private static void SpawnTrigger(MapWorld w, JObject obj)
+    {
+        var kind = obj["kind"]?.Value<string>() ?? "media";
+        var go = new GameObject("Trigger_" + kind);
+        go.transform.SetParent(w.Root, false);
+        go.transform.position = w.Point(obj);
+        var box = go.AddComponent<BoxCollider2D>();
+        box.isTrigger = true;
+        box.size = new Vector2(obj["w"]?.Value<float>() ?? 256f, obj["h"]?.Value<float>() ?? 256f);
+        if (kind == "media")
+        {
+            var media = go.AddComponent<MapMediaTrigger>();
+            media.Music = obj["music"];
+            media.Background = obj["background"];
+            return;
+        }
+        if (kind == "kill")
+        {
+            var spikes = w.RealTilemap("Spikes");
+            if (spikes != null) go.layer = spikes.gameObject.layer;
+            go.AddComponent<spikeScript>();
+            return;
+        }
+        var t = go.AddComponent<MapGroupTrigger>();
+        t.World = w;
+        t.Kind = kind;
+        t.Group = obj["group"]?.Value<string>();
+        t.Once = obj["once"]?.Value<bool>() ?? false;
+        t.Offset = new Vector2(obj["dx"]?.Value<float>() ?? 0f, obj["dy"]?.Value<float>() ?? 0f);
+        t.Back = obj["back"]?.Value<bool>() ?? false;
+        t.Seconds = obj[kind == "message" ? "seconds" : "time"]?.Value<float>() ?? (kind == "message" ? 3f : 1f);
+        t.Target = w.LevelPoint(obj["tx"]?.Value<float>() ?? 0f, obj["ty"]?.Value<float>() ?? 0f);
+        t.Zoom = Mathf.Max(0.2f, obj["size"]?.Value<float>() ?? 1f);
+        t.Text = obj["text"]?.Value<string>();
+    }
+
+    // One of the game's own sprites the level never places (its plant art), by name, centred where the editor put it.
+    private static void SpawnGameSprite(MapWorld w, JObject obj)
+    {
+        var name = obj["sprite"]?.Value<string>();
+        var sprite = RealAssetPalette.SpriteByName(name) ?? throw new Exception("no sprite '" + name + "' in the game");
+        var go = new GameObject("Plant_" + name);
+        go.transform.SetParent(w.Root, false);
+        go.transform.SetPositionAndRotation(w.Point(obj), MapWorld.Rot(obj));
+        go.transform.localScale = new Vector3(obj["scaleX"]?.Value<float>() ?? 1f, obj["scaleY"]?.Value<float>() ?? 1f, 1f);
+        var art = new GameObject("Sprite");
+        art.transform.SetParent(go.transform, false);
+        // The editor places the sprite's centre; the sprite's own pivot may be elsewhere.
+        art.transform.localPosition = (sprite.pivot - sprite.rect.size / 2f) / sprite.pixelsPerUnit;
+        var sr = art.AddComponent<SpriteRenderer>();
+        sr.sprite = sprite;
+        sr.flipX = obj["flipX"]?.Value<bool>() ?? false;
+        sr.flipY = obj["flipY"]?.Value<bool>() ?? false;
+        if (sr.flipX) art.transform.localPosition = new Vector3(-art.transform.localPosition.x, art.transform.localPosition.y, 0f);
+        if (sr.flipY) art.transform.localPosition = new Vector3(art.transform.localPosition.x, -art.transform.localPosition.y, 0f);
+        if (obj["alpha"] != null) sr.color = new Color(1f, 1f, 1f, Mathf.Clamp01(obj["alpha"].Value<float>()));
+        var lit = RealAssetPalette.Get<SpringScript>()?.GetComponentInChildren<SpriteRenderer>(true);
+        if (lit != null) sr.sharedMaterial = lit.sharedMaterial;
+        var deco = w.RealTilemap("ground")?.GetComponent<TilemapRenderer>();
+        if (deco != null) { sr.sortingLayerID = deco.sortingLayerID; sr.sortingOrder = deco.sortingOrder - 1; }
+        MapGroups.Add(w, obj, go);
+        if (obj["order"] != null) w.Stacked.Add((obj["order"].Value<int>(), go));
+        if (obj["behind"]?.Value<bool>() == true) (obj["depth"]?.Value<int>() == 2 ? w.BehindWalls : w.Behind).Add(go);
+    }
+
+    // One of the map's own images, placed like a decoration.
+    private static void SpawnCustomSprite(MapWorld w, JObject obj)
+    {
+        var file = obj["image"]?.Value<string>();
+        var sprite = (file != null ? MapMedia.LoadImage(file, false) : null) ?? throw new Exception("no image '" + file + "' in the map's assets");
+        var go = new GameObject("Image_" + file);
+        go.transform.SetParent(w.Root, false);
+        go.transform.SetPositionAndRotation(w.Point(obj), MapWorld.Rot(obj));
+        var scale = obj["scale"]?.Value<float>() ?? 1f;
+        go.transform.localScale = new Vector3(obj["scaleX"]?.Value<float>() ?? scale, obj["scaleY"]?.Value<float>() ?? scale, 1f);
+        var sr = go.AddComponent<SpriteRenderer>();
+        sr.sprite = sprite;
+        sr.flipX = obj["flipX"]?.Value<bool>() ?? false;
+        sr.flipY = obj["flipY"]?.Value<bool>() ?? false;
+        if (obj["alpha"] != null) sr.color = new Color(1f, 1f, 1f, Mathf.Clamp01(obj["alpha"].Value<float>()));
+        // Drawn like the level's decorations: in front of the walls, behind the ground.
+        var deco = w.RealTilemap("ground")?.GetComponent<TilemapRenderer>();
+        if (deco != null) { sr.sortingLayerID = deco.sortingLayerID; sr.sortingOrder = deco.sortingOrder - 1; }
+        MapGroups.Add(w, obj, go);
+        if (obj["order"] != null) w.Stacked.Add((obj["order"].Value<int>(), go));
+        if (obj["behind"]?.Value<bool>() == true) (obj["depth"]?.Value<int>() == 2 ? w.BehindWalls : w.Behind).Add(go);
     }
 
     // Text saying anything: a copy of one of the level's own sign texts (the
@@ -198,9 +358,12 @@ internal static class MapObjects
         text.text = obj["text"]?.Value<string>() ?? "";
         if (obj["color"] is JArray col && col.Count >= 3) text.color = new Color(col[0].Value<float>(), col[1].Value<float>(), col[2].Value<float>(), 1f);
         else text.color = new Color(text.color.r, text.color.g, text.color.b, 1f);
+        if (obj["alpha"] != null) text.alpha = Mathf.Clamp01(obj["alpha"].Value<float>());
         if (go.transform is RectTransform rect && scale.x != 0f && scale.y != 0f)
             rect.sizeDelta = new Vector2((obj["width"]?.Value<float>() ?? rect.sizeDelta.x * scale.x) / scale.x, (obj["height"]?.Value<float>() ?? rect.sizeDelta.y * scale.y) / scale.y);
+        MapGroups.Add(w, obj, go);
         if (obj["order"] != null) w.Stacked.Add((obj["order"].Value<int>(), go));
+        if (obj["behind"]?.Value<bool>() == true) (obj["depth"]?.Value<int>() == 2 ? w.BehindWalls : w.Behind).Add(go);
     }
 
     // ---- the level's own objects ----
@@ -214,6 +377,9 @@ internal static class MapObjects
         var source = w.FindSceneObject(path, MapWorld.SourcePoint(obj)) ?? throw new Exception("no scene object at '" + path + "' to copy");
         var clone = UnityEngine.Object.Instantiate(source.gameObject, w.Point(obj), source.rotation, w.Root);
         clone.name = source.name;
+        if (!string.IsNullOrEmpty(path)) w.ClonesByPath[path] = clone;
+        var doorPath = obj["door"]?.Value<string>();
+        if (!string.IsNullOrEmpty(doorPath)) w.DoorLinks.Add((clone, doorPath));
         // The editor's layering: among sprites drawn at the same level, nearer the camera is in front.
         if (obj["order"] != null)
         {
@@ -221,13 +387,12 @@ internal static class MapObjects
             clone.transform.position = new Vector3(at.x, at.y, at.z - 0.01f * obj["order"].Value<int>());
         }
         clone.SetActive(true);
+        MapGroups.Add(w, obj, clone);
         if (obj["order"] != null) w.Stacked.Add((obj["order"].Value<int>(), clone));
+        if (obj["behind"]?.Value<bool>() == true) (obj["depth"]?.Value<int>() == 2 ? w.BehindWalls : w.Behind).Add(clone);
         var course = obj["course"]?.Value<string>();
         if (!string.IsNullOrEmpty(course)) w.Links.Add((clone, course));
         if (obj["teleport"] is JObject teleport) w.Teleports.Add((clone, teleport));
-        // Course checkpoints: flagged by the editor, or (older maps) a copy of one of the level's.
-        if (obj["courseCheckpoint"]?.Value<bool>() == true || (path.StartsWith("Courses/") && clone.GetComponentInChildren<checkpointScript>(true) != null))
-            MapRespawn.MakeCourseCheckpoint(clone);
         try { MapCloneConfig.Apply(clone, obj); }
         catch (Exception e) { Debug.LogWarning("[RechargeMaps] settings for '" + path + "' failed: " + e.Message); }
     }
@@ -241,11 +406,57 @@ internal static class MapObjects
     private static void Hide(MapWorld w, JObject obj)
     {
         var target = LevelObject(w, obj).gameObject;
+        // A refresher is several sprites (its wings, its dotted recharging outline): hide all of it.
+        var refresher = target.GetComponentInParent<JiggleDropScript>(true);
+        if (refresher != null) { w.SetActive(refresher.gameObject, false); return; }
         if (obj["rendererOnly"]?.Value<bool>() != true) { w.SetActive(target, false); return; }
         var sr = target.GetComponent<SpriteRenderer>() ?? throw new Exception("no sprite to hide");
         var shown = sr.enabled;
         sr.enabled = false;
         w.OnUnload(() => { if (sr != null) sr.enabled = shown; });
+    }
+
+    // One of the level's own things, moved in the editor: the real object goes along by the same amount.
+    private static void Move(MapWorld w, JObject obj)
+    {
+        var target = LevelObject(w, obj);
+        var by = new Vector3(obj["dx"]?.Value<float>() ?? 0f, obj["dy"]?.Value<float>() ?? 0f, 0f);
+        target.position += by;
+        var t = target;
+        w.OnUnload(() => { if (t != null) t.position -= by; });
+    }
+
+    // A level thing turned, sized or flipped in the editor, about its own position.
+    private static void TransformLevel(MapWorld w, JObject obj)
+    {
+        var t = LevelObject(w, obj);
+        Quaternion rot = t.rotation;
+        Vector3 scale = t.localScale;
+        if (obj["rotation"] != null) t.rotation = Quaternion.Euler(0f, 0f, obj["rotation"].Value<float>()) * t.rotation;
+        if (obj["scale"] is JArray sc && sc.Count == 2) t.localScale = new Vector3(scale.x * sc[0].Value<float>(), scale.y * sc[1].Value<float>(), scale.z);
+        w.OnUnload(() => { if (t != null) { t.rotation = rot; t.localScale = scale; } });
+    }
+
+    // A level thing moved in or out in the editor's draw order: every sprite of it shifts by the same amount.
+    private static void OrderLevel(MapWorld w, JObject obj)
+    {
+        var delta = obj["delta"]?.Value<int>() ?? 0;
+        foreach (var r in LevelObject(w, obj).GetComponentsInChildren<Renderer>(true))
+        {
+            var rend = r;
+            rend.sortingOrder += delta;
+            w.OnUnload(() => { if (rend != null) rend.sortingOrder -= delta; });
+        }
+    }
+
+    // A level thing in one of the map's groups, for group triggers to show, hide or move.
+    private static void GroupLevel(MapWorld w, JObject obj)
+    {
+        var go = LevelObject(w, obj).gameObject;
+        var was = go.activeSelf;
+        var at = go.transform.position;
+        MapGroups.Add(w, obj, go);
+        w.OnUnload(() => { if (go != null) { go.SetActive(was); go.transform.position = at; } });
     }
 
     private static void Modify(MapWorld w, JObject obj)

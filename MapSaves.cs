@@ -77,6 +77,7 @@ public static class MapSaves
     {
         host.CancelInvoke(nameof(MapManager.MapAutosave));
         _savedForSceneChange = false;
+        _menus = null;
         // The title scene reloads itself once at startup: the swap waits for the gameplay scene.
         if (_pendingMapId != null && scene.name == "MainMenu")
         {
@@ -136,10 +137,17 @@ public static class MapSaves
 
     // Every frame: a scene change has started (the pause menu's own save is
     // off while a map is active), so save the map before the scene goes.
+    // The pause menus are found once a scene; the change-scene animation runs
+    // for a good second, so checking a few times a second is plenty.
+    private static pauseMenuScript[] _menus;
+    private static float _nextCheck;
+
     public static void Tick()
     {
-        if (ActiveMapId == null || _savedForSceneChange) return;
-        foreach (var menu in UnityEngine.Object.FindObjectsByType<pauseMenuScript>(FindObjectsSortMode.None))
+        if (ActiveMapId == null || _savedForSceneChange || Time.unscaledTime < _nextCheck) return;
+        _nextCheck = Time.unscaledTime + 0.2f;
+        if (_menus == null || Array.Exists(_menus, m => m == null)) _menus = UnityEngine.Object.FindObjectsByType<pauseMenuScript>(FindObjectsSortMode.None);
+        foreach (var menu in _menus)
         {
             if (!Reflect.GetField<bool>(menu, "changingSceneNow")) continue;
             _savedForSceneChange = true;

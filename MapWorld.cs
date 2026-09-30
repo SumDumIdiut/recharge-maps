@@ -26,7 +26,13 @@ internal class MapWorld
     public readonly MapGroup Group;
     public readonly bool Overlay;
     public readonly Vector2 Origin;
-    public readonly Transform Root;
+    // Where built things go: the map's root, or the current stage's while one builds.
+    public Transform Root { get; private set; }
+    private Transform _mainRoot;
+    // Objects only built for one area-1 state (edits in the overgrown stages), by state.
+    public readonly Dictionary<string, List<JObject>> StageObjects = new Dictionary<string, List<JObject>>();
+    private List<Action> _stageUndo = new List<Action>();
+    private List<Action> _collect;
     // Custom maps are laid out in the editor's level space and moved to the
     // pocket: level point + Shift is where it sits. (Overlays: no shift.)
     private readonly Vector2 _shift;
@@ -38,6 +44,16 @@ internal class MapWorld
     public readonly Dictionary<string, Sprite> CustomImages = new Dictionary<string, Sprite>();
     // Placed objects and free spikes with their place in the editor's stack.
     public readonly List<(int order, GameObject go)> Stacked = new List<(int, GameObject)>();
+    // Put behind the level in the editor: drawn under its ground and objects.
+    public readonly HashSet<GameObject> Behind = new HashSet<GameObject>();
+    // Further back: under every level tile layer, the walls included.
+    public readonly HashSet<GameObject> BehindWalls = new HashSet<GameObject>();
+    // Things by their editor group id, for group triggers.
+    public readonly Dictionary<string, List<GameObject>> Groups = new Dictionary<string, List<GameObject>>();
+    public readonly HashSet<GameObject> StartedHidden = new HashSet<GameObject>();
+    // Copies of the level's objects by their level path, and copied boxes waiting for the door they open.
+    public readonly Dictionary<string, GameObject> ClonesByPath = new Dictionary<string, GameObject>();
+    public readonly List<(GameObject box, string door)> DoorLinks = new List<(GameObject, string)>();
 
     private readonly List<Action> _undo = new List<Action>();
     private readonly Dictionary<string, Tilemap> _own = new Dictionary<string, Tilemap>();
@@ -57,7 +73,7 @@ internal class MapWorld
         _shift = Overlay ? Vector2.zero : Origin - editorOrigin;
         var root = new GameObject(RootPrefix + mapId);
         root.transform.position = Live(Origin);
-        Root = root.transform;
+        Root = _mainRoot = root.transform;
         OnUnload(() => { if (root != null) UnityEngine.Object.Destroy(root); });
     }
 
@@ -65,11 +81,39 @@ internal class MapWorld
 
     // ---- unloading ----
 
-    public void OnUnload(Action undo) => _undo.Add(undo);
+    public void OnUnload(Action undo) => (_collect ?? _undo).Add(undo);
+
+    // A stage's things build under their own root with their own undo, so the
+    // stage can be taken out again when the level changes state.
+    public void BeginStage(string state)
+    {
+        var go = new GameObject("Stage_" + state);
+        go.transform.SetParent(_mainRoot, false);
+        _stageUndo.Add(() => { if (go != null) UnityEngine.Object.Destroy(go); });
+        _collect = _stageUndo;
+        Root = go.transform;
+    }
+
+    public void EndStage()
+    {
+        _collect = null;
+        Root = _mainRoot;
+    }
+
+    public void UnloadStage()
+    {
+        for (int i = _stageUndo.Count - 1; i >= 0; i--)
+        {
+            try { _stageUndo[i](); }
+            catch (Exception e) { Debug.LogWarning("[RechargeMaps] unloading a stage step failed: " + e.Message); }
+        }
+        _stageUndo.Clear();
+    }
 
     // Newest first, so layered changes unwind in order.
     public void Unload()
     {
+        UnloadStage();
         for (int i = _undo.Count - 1; i >= 0; i--)
         {
             try { _undo[i](); }
@@ -164,12 +208,10 @@ internal class MapWorld
         go.transform.SetParent(Root, false);
         var real = RealTilemap(tilemapName);
         if (real != null) go.layer = real.gameObject.layer;
-        var orange = tilemapName.StartsWith("orange");
-        if (orange || tilemapName.StartsWith("blue"))
-        {
-            go.SetActive(real == null || real.gameObject.activeSelf);
-            JoinBlockSwap(go, orange);
-        }
+        // The block swapper only handles tilemaps (it switches their collision
+        // and dims them); these follow the level's own spike tilemap instead.
+        if (real != null && (tilemapName.StartsWith("orange") || tilemapName.StartsWith("blue")))
+            go.AddComponent<MapSwapFollower>().Follow = real;
         _holders[tilemapName] = go.transform;
         return go.transform;
     }
@@ -212,17 +254,43 @@ internal class MapWorld
         return tilemap.WorldToCell(Live(centre));
     }
 
+    // Tiles are queued per tilemap and set in one SetTiles call each (FlushPaint):
+    // setting thousands one by one is most of a big map's load time.
+    private readonly Dictionary<Tilemap, Dictionary<Vector3Int, TileChangeData>> _pending = new Dictionary<Tilemap, Dictionary<Vector3Int, TileChangeData>>();
+
     public void Paint(Tilemap tilemap, Vector3Int cell, TileBase tile, Matrix4x4? matrix)
     {
-        if (Overlay && !_own.ContainsValue(tilemap)) RememberCell(tilemap, cell);
-        tilemap.SetTile(cell, tile);
-        if (matrix == null) return;
-        tilemap.SetTileFlags(cell, TileFlags.None);
-        tilemap.SetTransformMatrix(cell, matrix.Value);
+        if (!_pending.TryGetValue(tilemap, out var cells)) _pending[tilemap] = cells = new Dictionary<Vector3Int, TileChangeData>();
+        cells[cell] = new TileChangeData(cell, tile, Color.white, matrix ?? Matrix4x4.identity);
+    }
+
+    public void FlushPaint()
+    {
+        foreach (var pair in _pending)
+        {
+            var tilemap = pair.Key;
+            if (tilemap == null) continue;
+            var changes = new TileChangeData[pair.Value.Count];
+            pair.Value.Values.CopyTo(changes, 0);
+            if (Overlay && !_own.ContainsValue(tilemap))
+            {
+                // What the level had there, all put back in one call on unload.
+                var old = new TileChangeData[changes.Length];
+                for (int i = 0; i < changes.Length; i++)
+                {
+                    var p = changes[i].position;
+                    old[i] = new TileChangeData(p, tilemap.GetTile(p), tilemap.GetColor(p), tilemap.GetTransformMatrix(p));
+                }
+                OnUnload(() => { if (tilemap != null) tilemap.SetTiles(old, true); });
+            }
+            tilemap.SetTiles(changes, true);
+        }
+        _pending.Clear();
     }
 
     public void Erase(Tilemap tilemap, Vector3Int cell)
     {
+        if (_pending.TryGetValue(tilemap, out var queued)) queued.Remove(cell);
         if (tilemap.GetTile(cell) == null) return;
         if (!_own.ContainsValue(tilemap)) RememberCell(tilemap, cell);
         tilemap.SetTile(cell, null);
@@ -255,6 +323,9 @@ internal class MapWorld
 
     private void JoinBlockSwap(GameObject tilemapGo, bool orange)
     {
+        // colouredBlockSwapper.swapBlocks uses all three on every entry; anything
+        // else in its lists crashes every swap (and so every respawn after block swap).
+        if (tilemapGo.GetComponent<Tilemap>() == null || tilemapGo.GetComponent<TilemapCollider2D>() == null || tilemapGo.GetComponent<TilemapRenderer>() == null) return;
         var swapper = Singleton<colouredBlockSwapper>.Instance;
         var field = orange ? "orange" : "blue";
         if (swapper == null || Reflect.FieldOf<colouredBlockSwapper>(field) == null) return;
@@ -328,10 +399,12 @@ internal class MapWorld
         return best;
     }
 
-    private static string HierarchyPath(Transform t)
+    private readonly Dictionary<Transform, string> _paths = new Dictionary<Transform, string>();
+    private string HierarchyPath(Transform t)
     {
-        var path = t.name;
-        for (var p = t.parent; p != null; p = p.parent) path = p.name + "/" + path;
+        if (_paths.TryGetValue(t, out var known)) return known;
+        var path = t.parent == null ? t.name : HierarchyPath(t.parent) + "/" + t.name;
+        _paths[t] = path;
         return path;
     }
 
@@ -351,5 +424,34 @@ internal class MapWorld
         foreach (var (field, active) in new[] { ("overgrowthEnable", overgrown), ("overgrowthDisable", !overgrown) })
             foreach (var go in Reflect.GetField<GameObject[]>(loader, field) ?? Array.Empty<GameObject>())
                 SetActive(go, active);
+    }
+}
+
+// Makes non-tilemap things (free blue / orange spikes) swap like the level's
+// tilemap of that colour: collision off and dimmed while it's switched off.
+internal class MapSwapFollower : MonoBehaviour
+{
+    public Tilemap Follow;
+    private TilemapCollider2D _source;
+    private bool? _on;
+    private readonly Dictionary<SpriteRenderer, Color> _colours = new Dictionary<SpriteRenderer, Color>();
+
+    private int _children = -1;
+
+    private void Update()
+    {
+        if (Follow == null) return;
+        if (_source == null) _source = Follow.GetComponent<TilemapCollider2D>();
+        var on = _source == null || _source.enabled;
+        // Free spikes are only added while the map loads; re-read them when that count changes.
+        if (_on == on && _children == transform.childCount) return;
+        _children = transform.childCount;
+        _on = on;
+        foreach (var col in GetComponentsInChildren<Collider2D>(true)) col.enabled = on;
+        foreach (var sr in GetComponentsInChildren<SpriteRenderer>(true))
+        {
+            if (!_colours.TryGetValue(sr, out var own)) _colours[sr] = own = sr.color;
+            sr.color = on ? own : new Color(own.r * 0.35f, own.g * 0.35f, own.b * 0.35f, 0.75f);
+        }
     }
 }

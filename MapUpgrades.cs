@@ -91,12 +91,33 @@ internal static class MapUpgrades
                 var path = obj["path"]?.Value<string>() ?? "";
                 if (obj["zip"] != null || path.Contains("ZipMover")) zips = true;
                 if (path.Contains("Resetter")) refreshers = true;
+                if (def.Overlay) refreshers = true;
                 if (obj["teleport"] != null) teleporters = true;
             }
         var player = def?.Player;
         if (zips && (player?["zipMovers"]?.Value<bool>() ?? true)) Unlock(globalStats.globalUpgradeSet.zipMoversUnlocked);
         if (refreshers && (player?["refreshers"]?.Value<bool>() ?? true)) Unlock(globalStats.globalUpgradeSet.unlockJiggleDrops);
         if (teleporters && (player?["teleporters"]?.Value<bool>() ?? true)) Unlock(globalStats.globalUpgradeSet.unlockTeleporters);
+    }
+
+    // The level's own refreshers only look at the refresher unlocks when they
+    // come on screen or get used, so ones already in view at load stay hidden:
+    // have every one re-check now. An overgrown level has the orb omnidash adds.
+    public static void RefreshLevelRefreshers(MapWorld w)
+    {
+        var overgrown = Singleton<globalStats>.Instance != null && Singleton<globalStats>.Instance.currentA1State == globalStats.area1states.Overgrown;
+        if (w.Overlay && overgrown && (!globalStats.globalUpgradeDict.TryGetValue(globalStats.globalUpgradeSet.moreRefreshOrbs, out var orbs) || orbs < 1.0))
+            globalStats.globalUpgradeDict[globalStats.globalUpgradeSet.moreRefreshOrbs] = 1.0;
+        var show = typeof(JiggleDropScript).GetMethod("SetActiveVisualState", BindingFlags.Instance | BindingFlags.NonPublic);
+        if (show == null) return;
+        int n = 0;
+        foreach (var drop in Resources.FindObjectsOfTypeAll<JiggleDropScript>())
+        {
+            if (drop == null || !drop.gameObject.scene.IsValid() || !drop.gameObject.activeInHierarchy) continue;
+            try { show.Invoke(drop, new object[] { false }); n++; }
+            catch (Exception e) { Debug.LogWarning("[RechargeMaps] refresher " + drop.name + ": " + e.InnerException?.Message); }
+        }
+        Debug.Log("[RechargeMaps] refreshed " + n + " refreshers");
     }
 
     private static void Unlock(globalStats.globalUpgradeSet upgrade)

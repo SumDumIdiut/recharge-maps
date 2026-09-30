@@ -20,8 +20,16 @@ internal class MapDefinition
     [JsonProperty("baseState")] public string BaseState;
     [JsonProperty("player")] public Newtonsoft.Json.Linq.JObject Player;
     [JsonProperty("cameraSize")] public float? CameraSize;
+    // The map's music ("level", "none", "game:<track>", "asset:<file>") and
+    // background (null / "level", or { image, parallax, scale }); see MapMedia.
+    [JsonProperty("music")] public Newtonsoft.Json.Linq.JToken Music;
+    [JsonProperty("background")] public Newtonsoft.Json.Linq.JToken Background;
+    // Edits in the overgrown stages are kept per area-1 state: the game's own state picks them.
+    [JsonProperty("stages")] public bool Stages;
     // Custom maps: the editor's level-space point their coordinates are measured from.
     [JsonProperty("levelOrigin")] public float[] LevelOrigin;
+    // Groups (see MapGroups) that start switched off until a trigger shows them.
+    [JsonProperty("hiddenGroups")] public List<string> HiddenGroups;
 
     public static MapDefinition Read(string mapId)
     {
@@ -52,6 +60,14 @@ internal class MapGroup
     [JsonProperty("reward")] public MapReward Reward;
     [JsonProperty("objects")] public List<Newtonsoft.Json.Linq.JObject> Objects = new List<Newtonsoft.Json.Linq.JObject>();
     [JsonProperty("courses")] public List<MapCourse> Courses;
+    // More spawns, cycled with Q / E in game (after the main one).
+    [JsonProperty("spawns")] public List<MapPoint> Spawns;
+}
+
+internal class MapPoint
+{
+    [JsonProperty("x")] public float X;
+    [JsonProperty("y")] public float Y;
 }
 
 internal class MapCourse

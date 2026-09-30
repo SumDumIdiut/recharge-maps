@@ -9,6 +9,30 @@ internal static class MapCloneConfig
     // The map editor's settings for a cloned object: rotation (degrees), scale
     // [x, y] (negative flips), script fields {"Type.field": value}, and a zip
     // mover's track {end: [x, y], time, backTime, width}.
+    // The editor's opacity, over whatever the object's own colours are.
+    public static void Fade(GameObject go, float alpha)
+    {
+        alpha = Mathf.Clamp01(alpha);
+        foreach (var sr in go.GetComponentsInChildren<SpriteRenderer>(true)) { var c = sr.color; c.a *= alpha; sr.color = c; }
+        foreach (var tm in go.GetComponentsInChildren<UnityEngine.Tilemaps.Tilemap>(true)) { var c = tm.color; c.a *= alpha; tm.color = c; }
+        foreach (var tx in go.GetComponentsInChildren<TMPro.TMP_Text>(true)) tx.alpha *= alpha;
+    }
+
+    // A checkpoint's trigger box as the editor sized it, in world units around the object.
+    private static void SizeCheckpoint(GameObject clone, JObject trig)
+    {
+        // A checkpoint's box, or a long-fall zone's.
+        Component owner = clone.GetComponentInChildren<checkpointScript>(true);
+        if (owner == null) owner = clone.GetComponentInChildren<longFallColliderController>(true);
+        var box = owner != null ? owner.GetComponent<BoxCollider2D>() : null;
+        if (box == null) { Debug.LogWarning("[RechargeMaps] no box trigger to size on " + clone.name); return; }
+        var s = box.transform.lossyScale;
+        if (Mathf.Abs(s.x) < 1e-4f || Mathf.Abs(s.y) < 1e-4f) return;
+        var at = (Vector2)(clone.transform.position - box.transform.position);
+        box.size = new Vector2((trig["w"]?.Value<float>() ?? 100f) / Mathf.Abs(s.x), (trig["h"]?.Value<float>() ?? 100f) / Mathf.Abs(s.y));
+        box.offset = new Vector2((at.x + (trig["dx"]?.Value<float>() ?? 0f)) / s.x, (at.y + (trig["dy"]?.Value<float>() ?? 0f)) / s.y);
+    }
+
     public static void Apply(GameObject clone, JObject obj)
     {
         var t = clone.transform;
@@ -33,6 +57,8 @@ internal static class MapCloneConfig
             var sr = clone.GetComponent<SpriteRenderer>();
             if (sr != null) sr.color = new Color(tint[0].Value<float>(), tint[1].Value<float>(), tint[2].Value<float>(), sr.color.a);
         }
+        if (obj["alpha"] != null) Fade(clone, obj["alpha"].Value<float>());
+        if (obj["trigger"] is JObject trig) SizeCheckpoint(clone, trig);
         if (obj["width"] != null)
         {
             // Stretch a tiled sprite (a wide spring) - sprite and collider together.

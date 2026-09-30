@@ -463,18 +463,48 @@ internal static class RealAssetPalette
         return tiles.FirstOrDefault(t => t.name == tileName) ?? LooseTile(tileName);
     }
 
-    // A tile the level never places (a blue block's bottom corners, say): the
-    // game's own Tile asset if it's loaded, else a plain tile made from the
-    // tileset sprite of that name.
+    // A tile the level never places (a strip end, an Asset_Sheet plate): the
+    // game's own Tile asset if it has one, else a plain tile made from the
+    // tileset sprite of that name - from the game's sprite atlas, which holds
+    // every tileset sprite even when nothing in the level uses it.
     private static readonly Dictionary<string, TileBase> LooseTiles = new Dictionary<string, TileBase>();
+    private static Dictionary<string, TileBase> _tilesByName;
+    private static Dictionary<string, Sprite> _spritesByName;
+    // Any of the game's sprites by name, loaded or still packed in its atlas.
+    public static Sprite SpriteByName(string name)
+    {
+        if (string.IsNullOrEmpty(name)) return null;
+        LooseTile("\u0000");
+        if (_spritesByName.TryGetValue(name, out var sprite) && sprite != null) return sprite;
+        foreach (var atlas in Resources.FindObjectsOfTypeAll<UnityEngine.U2D.SpriteAtlas>())
+        {
+            sprite = atlas != null ? atlas.GetSprite(name) : null;
+            if (sprite != null) { sprite.name = name; _spritesByName[name] = sprite; return sprite; }
+        }
+        return null;
+    }
+
     private static TileBase LooseTile(string tileName)
     {
         if (string.IsNullOrEmpty(tileName)) return null;
-        if (LooseTiles.TryGetValue(tileName, out var cached)) return cached;
-        TileBase found = Resources.FindObjectsOfTypeAll<TileBase>().FirstOrDefault(t => t.name == tileName);
+        if (LooseTiles.TryGetValue(tileName, out var cached) && cached != null) return cached;
+        if (_tilesByName == null)
+        {
+            _tilesByName = new Dictionary<string, TileBase>();
+            foreach (var t in Resources.FindObjectsOfTypeAll<TileBase>()) if (t != null && !_tilesByName.ContainsKey(t.name)) _tilesByName[t.name] = t;
+            _spritesByName = new Dictionary<string, Sprite>();
+            foreach (var sp in Resources.FindObjectsOfTypeAll<Sprite>()) if (sp != null && !_spritesByName.ContainsKey(sp.name)) _spritesByName[sp.name] = sp;
+        }
+        _tilesByName.TryGetValue(tileName, out var found);
         if (found == null)
         {
-            var sprite = Resources.FindObjectsOfTypeAll<Sprite>().FirstOrDefault(s => s.name == tileName);
+            _spritesByName.TryGetValue(tileName, out var sprite);
+            if (sprite == null)
+                foreach (var atlas in Resources.FindObjectsOfTypeAll<UnityEngine.U2D.SpriteAtlas>())
+                {
+                    sprite = atlas != null ? atlas.GetSprite(tileName) : null;
+                    if (sprite != null) { sprite.name = tileName; _spritesByName[tileName] = sprite; break; }
+                }
             if (sprite != null)
             {
                 var tile = ScriptableObject.CreateInstance<Tile>();

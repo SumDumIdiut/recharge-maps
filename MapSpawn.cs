@@ -20,6 +20,7 @@ internal static class MapSpawn
 
     public static void Place(MapWorld w, MonoBehaviour host)
     {
+        _spawnIndex = 0;
         var movement = MapUpgrades.GamePlayer();
         if (movement == null) { Debug.LogWarning("[RechargeMaps] no gameplay Player to put into the map"); return; }
         var player = movement.gameObject;
@@ -48,6 +49,7 @@ internal static class MapSpawn
         }
         else target = w.LevelPoint(w.Group.SpawnX ?? w.Group.StartX, w.Group.SpawnY ?? w.Group.StartY);
 
+        if (w.Overlay) LoadZoneAt(target);
         MoveTo(movement, MapWorld.Live(target));
         if (atSpawn) movement.respawnPoint = target + RespawnLift;
         if (movement.cam != null)
@@ -56,6 +58,74 @@ internal static class MapSpawn
             movement.cam.newTarget(player, movement.cam.defaultoffset, true, Vector2.zero);
         }
         host.StartCoroutine(Settle(movement, target, atSpawn, camSize));
+    }
+
+    // ---- the spawn switcher: Q / E go to the previous / next of the map's spawns ----
+
+    private static int _spawnIndex;
+
+    private static List<Vector2> Spawns(MapWorld w)
+    {
+        var list = new List<Vector2>();
+        if (w.Group.SpawnX != null || !w.Overlay || !w.Group.KeepSpawn) list.Add(w.LevelPoint(w.Group.SpawnX ?? w.Group.StartX, w.Group.SpawnY ?? w.Group.StartY));
+        foreach (var p in w.Group.Spawns ?? new List<MapPoint>()) list.Add(w.LevelPoint(p.X, p.Y));
+        return list;
+    }
+
+    public static void TickSwitcher(MapWorld w, MonoBehaviour host)
+    {
+        var kb = UnityEngine.InputSystem.Keyboard.current;
+        if (kb == null || Time.timeScale <= 0f || w.Group.Spawns == null || w.Group.Spawns.Count == 0) return;
+        var step = kb.eKey.wasPressedThisFrame ? 1 : kb.qKey.wasPressedThisFrame ? -1 : 0;
+        if (step == 0) return;
+        var movement = MapUpgrades.GamePlayer();
+        var spawns = Spawns(w);
+        if (movement == null || spawns.Count == 0) return;
+        _spawnIndex = ((_spawnIndex + step) % spawns.Count + spawns.Count) % spawns.Count;
+        var target = spawns[_spawnIndex];
+        if (w.Overlay) LoadZoneAt(target);
+        MoveTo(movement, MapWorld.Live(target));
+        movement.respawnPoint = target + RespawnLift;
+        var camSize = w.Def.CameraSize > 0 ? w.Def.CameraSize.Value : DefaultCamSize;
+        if (movement.cam != null)
+        {
+            movement.cam.setup(movement.transform.position, camSize);
+            movement.cam.newTarget(movement.gameObject, movement.cam.defaultoffset, true, Vector2.zero);
+        }
+        MapMessage.Show("Spawn " + (_spawnIndex + 1) + " / " + spawns.Count, 1.2f);
+        host.StartCoroutine(Settle(movement, target, true, camSize));
+    }
+
+    // A spawn in another zone (area 2 below area 1...) loads that zone first, as
+    // the level's own zone triggers would on the way there - at once, so the
+    // player lands on its ground.
+    private static void LoadZoneAt(Vector2 level)
+    {
+        var loader = Singleton<ZoneLoader>.Instance;
+        var zones = loader != null ? Recharge.ModApi.Reflect.GetField<GameObject[]>(loader, "allZones") : null;
+        if (zones == null) return;
+        int best = -1;
+        float bestArea = float.MaxValue, bestDist = float.MaxValue;
+        for (int i = 0; i < zones.Length; i++)
+        {
+            if (zones[i] == null) continue;
+            var ts = zones[i].GetComponentsInChildren<Transform>(true);
+            if (ts.Length < 2) continue;
+            var box = new Rect(MapWorld.LevelOf(ts[1].position), Vector2.zero);
+            foreach (var t in ts.Skip(1))
+            {
+                var p = MapWorld.LevelOf(t.position);
+                box = Rect.MinMaxRect(Mathf.Min(box.xMin, p.x), Mathf.Min(box.yMin, p.y), Mathf.Max(box.xMax, p.x), Mathf.Max(box.yMax, p.y));
+            }
+            var area = box.width * box.height;
+            var dist = box.Contains(level) ? 0f : Vector2.Distance(level, new Vector2(Mathf.Clamp(level.x, box.xMin, box.xMax), Mathf.Clamp(level.y, box.yMin, box.yMax)));
+            if (dist < bestDist || (dist == bestDist && area < bestArea)) { best = i; bestDist = dist; bestArea = area; }
+        }
+        if (best < 0 || loader.activeZone == best + 1) return;
+        Debug.Log("[RechargeMaps] spawn is in zone " + (best + 1) + "; loading it");
+        var load = typeof(ZoneLoader).GetMethod("_LoadZone", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+        if (load != null) load.Invoke(loader, new object[] { best + 1 });
+        else loader.LoadZone(best + 1, true);
     }
 
     private static void MoveTo(Movement movement, Vector3 pos)

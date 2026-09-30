@@ -104,11 +104,14 @@ internal class MapManager : MonoBehaviour
 
             var w = new MapWorld(mapId, def);
             _world = w;
-            if (w.Overlay) w.ApplyBaseState(def.BaseState);
+            // A map with stage edits follows the game's own area-1 state; others show the one they were made in.
+            if (w.Overlay && !def.Stages) w.ApplyBaseState(def.BaseState);
             var built = MapObjects.Build(w);
+            MapStages.Start(w);
             MapCourses.Build(w);
-            MapRespawn.WatchLevelCourseCheckpoints(w);
+            MapMedia.Start(w, this);
             MapSpawn.Place(w, this);
+            StartCoroutine(RefreshersNextFrame(w));
             if (newGame && w.Overlay) StartCoroutine(ShowTutorialGlyphs());
             Debug.Log("[RechargeMaps] loaded " + (w.Overlay ? "overlay" : "custom") + " map '" + mapId + "' (" + built + "/" + w.Group.Objects.Count + " objects)" + (newGame ? " as a new game" : ""));
         }
@@ -116,6 +119,14 @@ internal class MapManager : MonoBehaviour
         {
             Debug.LogError("[RechargeMaps] loading '" + mapId + "' failed: " + e);
         }
+    }
+
+    // After the scene's own Start() calls, which hide every refresher's sprites.
+    private System.Collections.IEnumerator RefreshersNextFrame(MapWorld w)
+    {
+        yield return null;
+        yield return null;
+        if (_world == w) MapUpgrades.RefreshLevelRefreshers(w);
     }
 
     // A new game shows the game's control glyphs; loading the map can brush
@@ -133,10 +144,17 @@ internal class MapManager : MonoBehaviour
         }
     }
 
+    private int _zone = -1;
+
     private void Update()
     {
         MapSaves.Tick();
         if (_world != null) MapRespawn.Tick(MapUpgrades.GamePlayer());
+        if (_world != null) MapStages.Tick(_world);
+        if (_world != null) MapSpawn.TickSwitcher(_world, this);
+        var zone = Singleton<ZoneLoader>.Instance != null ? Singleton<ZoneLoader>.Instance.activeZone : 0;
+        if (_world != null && zone != _zone) StartCoroutine(RefreshersNextFrame(_world));
+        _zone = zone;
     }
 
     // Called by MapSaves' repeating Invoke while a map's save is active.
