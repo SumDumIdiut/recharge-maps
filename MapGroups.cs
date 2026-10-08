@@ -164,3 +164,19 @@ internal static class MapMessage
         Object.Destroy(go, Mathf.Max(0.5f, seconds));
     }
 }
+
+// When an end-credits trigger fires: the area layer its credits play on comes on,
+// even outside the area it belongs to (MapWorld.ZoneOnly would keep it off there).
+internal class MapCreditsShow : MonoBehaviour
+{
+    public MapWorld World;
+
+    private void OnTriggerEnter2D(Collider2D collision)
+    {
+        if (World == null || collision.GetComponent<Movement>() == null) return;
+        var credits = GetComponentInChildren<EndCreditsTrigger>(true)?.credits;
+        for (var t = credits != null ? credits.transform : null; t != null; t = t.parent)
+            foreach (var (go, _) in World.ZoneOnly)
+                if (go != null && go.transform == t) go.SetActive(true);
+    }
+}

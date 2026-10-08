@@ -16,7 +16,10 @@ internal static class MapUpgrades
     private static string Full(string folder) => Application.persistentDataPath + folder;
 
     // Bumped when what a fresh map start means changes, so older map saves start over once.
-    public static string StartMarker(JObject player) => "v8 " + player.ToString(Formatting.None);
+    // Bumped when what a fresh map start means changes, so older map saves start over once.
+// v9: a start now resets the player's whole state, so saves written under v8 - which kept
+// whatever light, currency and upgrades the previously played map left behind - restart once.
+public static string StartMarker(JObject player) => "v9 " + player.ToString(Formatting.None);
 
     // The gameplay player: the title screen stays loaded underneath with its own.
     public static Movement GamePlayer()
@@ -57,6 +60,12 @@ internal static class MapUpgrades
 
     // A map started as a new game: its Level settings on top of the new game,
     // remembered so later plays continue from the map's save instead.
+    //
+    // Every bit of per-save player state is set here, not just the handful the
+    // Level panel lists. globalStats is a static singleton that lives across scene
+    // changes, so whatever is left alone keeps whatever the last map (or Base Game)
+    // happened to have - that is how every map ended up carrying a personal light
+    // and another map's cash and upgrades, then saved them as its own.
     public static void ApplyStart(string mapId, JObject player)
     {
         if (player == null) return;
@@ -73,10 +82,60 @@ internal static class MapUpgrades
         mv.wallJumpUnlocked = player["wallJump"]?.Value<bool>() ?? true;
         mv.blockSwapUnlocked = player["blockSwap"]?.Value<bool>() ?? false;
         mv.omniDashUnlocked = player["omniDash"]?.Value<bool>() ?? false;
+
+        // The light is an ability too: on only if the map asks for it, and off again
+        // after a map that had one. Pocket maps switch their own on in MapSpawn,
+        // which is where the level's lights can't reach.
+        bool light = player["light"]?.Value<bool>() ?? false;
+        mv.lightActive = light;
+        if (light)
+        {
+            var radius = player["lightRadius"]?.Value<float>();
+            if (radius != null && radius.Value > 0f) mv.lightRadius = radius.Value;
+        }
+        if (mv.personalLight != null)
+        {
+            mv.personalLight.enabled = light;
+            if (light && mv.lightRadius > 0f) mv.personalLight.pointLightOuterRadius = mv.lightRadius;
+        }
+        // Block colours belong to the level, not the map. The Checkpoints setting is the player's
+        // own (the pause menu's), so deaths respawn exactly as in the base game.
+        mv.isBlueActiveOnRespawn = false;
+
+        // Every currency back to zero, then this map's own figures: Cash from the top
+        // level, the rest from an optional "currencies" object.
+        foreach (var currency in Enum.GetValues(typeof(globalStats.Currencies)).Cast<globalStats.Currencies>())
+            globalStats.currencyLookup[currency] = 0.0;
+        globalStats.currencyLookup[globalStats.Currencies.Cash] = Math.Max(0.0, player["cash"]?.Value<double>() ?? 0.0);
+        var currencies = player["currencies"] as JObject;
+        if (currencies != null)
+            foreach (var prop in currencies.Properties())
+                if (Enum.TryParse(prop.Name, true, out globalStats.Currencies which) && globalStats.currencyLookup.ContainsKey(which))
+                    globalStats.currencyLookup[which] = Math.Max(0.0, prop.Value.Value<double>());
+
+        // And every global upgrade, so a map can't inherit cashPerLoop, the clone
+        // multipliers or the late-game unlocks from whatever was played before it.
+        foreach (var upgrade in Enum.GetValues(typeof(globalStats.globalUpgradeSet)).Cast<globalStats.globalUpgradeSet>())
+            globalStats.globalUpgradeDict[upgrade] = 0.0;
         globalStats.globalUpgradeDict[globalStats.globalUpgradeSet.zipMoversUnlocked] = (player["zipMovers"]?.Value<bool>() ?? true) ? 1.0 : 0.0;
         globalStats.globalUpgradeDict[globalStats.globalUpgradeSet.unlockJiggleDrops] = (player["refreshers"]?.Value<bool>() ?? true) ? 1.0 : 0.0;
         globalStats.globalUpgradeDict[globalStats.globalUpgradeSet.unlockTeleporters] = (player["teleporters"]?.Value<bool>() ?? true) ? 1.0 : 0.0;
-        globalStats.currencyLookup[globalStats.Currencies.Cash] = Math.Max(0.0, player["cash"]?.Value<double>() ?? 0.0);
+        var upgrades = player["upgrades"] as JObject;
+        if (upgrades != null)
+            foreach (var prop in upgrades.Properties())
+                if (Enum.TryParse(prop.Name, true, out globalStats.globalUpgradeSet which) && globalStats.globalUpgradeDict.ContainsKey(which))
+                    globalStats.globalUpgradeDict[which] = prop.Value.Value<double>();
+
+        var stats = Singleton<globalStats>.Instance;
+        if (stats != null)
+        {
+            stats.visitedTeleporters?.Clear();
+            stats.currentA1State = globalStats.area1states.normal;
+            stats.Zone2toZone1PathOpen = false;
+            stats.vmanScore = 0;
+            stats.secretsFound = 0;
+        }
+
         Reset();
         MapSaves.MarkStart(mapId, player);
     }
@@ -217,7 +276,7 @@ internal class MapUpgradeBox : MonoBehaviour
         {
             case "doubleJump": Movement(upgradeBox.movementUpgrades.doubleJump); break;
             case "wallJump": Movement(upgradeBox.movementUpgrades.wallJump); break;
-            case "blockSwap": Movement(upgradeBox.movementUpgrades.unlockBlockSwap); break;
+            case "blockSwap": Movement(upgradeBox.movementUpgrades.swapBlocksOnce); break;
             case "zipMovers": Global(globalStats.globalUpgradeSet.zipMoversUnlocked); break;
             case "omniDash": Global(globalStats.globalUpgradeSet.vmanTime); _omni = true; break;
             case "refreshers": Global(globalStats.globalUpgradeSet.unlockJiggleDrops); break;

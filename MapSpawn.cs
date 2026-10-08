@@ -1,3 +1,4 @@
+using Newtonsoft.Json.Linq;
 using System.Collections;
 using System.Collections.Generic;
 using System.Linq;
@@ -38,12 +39,15 @@ internal static class MapSpawn
         var atSpawn = true;
         if (continuing && (w.Overlay || (movement.respawnPoint - w.Origin).magnitude < PocketReach))
         {
-            if (w.Overlay) { FollowWithCamera(movement, player.transform.position, camSize, host); return; }
+            // Wherever the save left off, the area it is in still has to be the one loaded -
+            // a save made in another zone would otherwise open on a dark, empty level.
+            if (w.Overlay) { LoadZoneAt(MapWorld.LevelOf(player.transform.position)); FollowWithCamera(movement, player.transform.position, camSize, host); return; }
             target = movement.respawnPoint;
             atSpawn = false;
         }
         else if (w.Overlay && w.Group.KeepSpawn)
         {
+            LoadZoneAt(MapWorld.LevelOf(player.transform.position));
             FollowWithCamera(movement, player.transform.position, camSize, host);
             return;
         }
@@ -72,6 +76,15 @@ internal static class MapSpawn
         return list;
     }
 
+    // Each spawn's area, in the same order as Spawns.
+    private static List<JObject> SpawnAreas(MapWorld w)
+    {
+        var list = new List<JObject>();
+        if (w.Group.SpawnX != null || !w.Overlay || !w.Group.KeepSpawn) list.Add(w.Group.SpawnArea);
+        foreach (var p in w.Group.Spawns ?? new List<MapPoint>()) list.Add(p.Area);
+        return list;
+    }
+
     public static void TickSwitcher(MapWorld w, MonoBehaviour host)
     {
         var kb = UnityEngine.InputSystem.Keyboard.current;
@@ -83,7 +96,11 @@ internal static class MapSpawn
         if (movement == null || spawns.Count == 0) return;
         _spawnIndex = ((_spawnIndex + step) % spawns.Count + spawns.Count) % spawns.Count;
         var target = spawns[_spawnIndex];
-        if (w.Overlay) LoadZoneAt(target);
+        var area = SpawnAreas(w)[_spawnIndex];
+        if (area != null) MapMedia.ApplyArea(area, true);
+        else if (w.Overlay) LoadZoneAt(target);
+        // A map made from the level: the area at that spot of the level (its background, lights).
+        else if (w.Def.AreaState != null) LoadZoneAt(target - w.Shift);
         MoveTo(movement, MapWorld.Live(target));
         movement.respawnPoint = target + RespawnLift;
         var camSize = w.Def.CameraSize > 0 ? w.Def.CameraSize.Value : DefaultCamSize;
@@ -96,16 +113,24 @@ internal static class MapSpawn
         host.StartCoroutine(Settle(movement, target, true, camSize));
     }
 
-    // A spawn in another zone (area 2 below area 1...) loads that zone first, as
-    // the level's own zone triggers would on the way there - at once, so the
-    // player lands on its ground.
+    // A spawn outside the area the game already has loaded switches to the area it
+    // falls in, as the level's own zone triggers would on the way there - at once, so
+    // the player lands on its ground.
+    //
+    // The point of leaving the loaded area alone is that the zone boxes are enormous
+    // and overlap heavily: area 1's box swallows most of the level, and the level's own
+    // start (0,0) sits exactly on area 2's edge, so it is "inside" both. Picking the
+    // closest/smallest box there flips a normal area-1 spawn to area 2 and opens the
+    // level pitch black. So: inside the loaded area means leave it alone, and a map
+    // that really wants another area asks for it by name in its spawnArea.
     private static void LoadZoneAt(Vector2 level)
     {
         var loader = Singleton<ZoneLoader>.Instance;
         var zones = loader != null ? Recharge.ModApi.Reflect.GetField<GameObject[]>(loader, "allZones") : null;
         if (zones == null) return;
         int best = -1;
-        float bestArea = float.MaxValue, bestDist = float.MaxValue;
+        float bestDist = float.MaxValue;
+        var active = loader.activeZone - 1;
         for (int i = 0; i < zones.Length; i++)
         {
             if (zones[i] == null) continue;
@@ -117,12 +142,17 @@ internal static class MapSpawn
                 var p = MapWorld.LevelOf(t.position);
                 box = Rect.MinMaxRect(Mathf.Min(box.xMin, p.x), Mathf.Min(box.yMin, p.y), Mathf.Max(box.xMax, p.x), Mathf.Max(box.yMax, p.y));
             }
-            var area = box.width * box.height;
+            if (i == active)
+            {
+                if (!box.Contains(level)) continue;
+                Debug.Log("[RechargeMaps] spawn (" + level.x.ToString("0") + "," + level.y.ToString("0") + ") is inside zone " + loader.activeZone + "; keeping it");
+                return;
+            }
             var dist = box.Contains(level) ? 0f : Vector2.Distance(level, new Vector2(Mathf.Clamp(level.x, box.xMin, box.xMax), Mathf.Clamp(level.y, box.yMin, box.yMax)));
-            if (dist < bestDist || (dist == bestDist && area < bestArea)) { best = i; bestDist = dist; bestArea = area; }
+            if (dist < bestDist) { best = i; bestDist = dist; }
         }
-        if (best < 0 || loader.activeZone == best + 1) return;
-        Debug.Log("[RechargeMaps] spawn is in zone " + (best + 1) + "; loading it");
+        if (best < 0 || best == active) return;
+        Debug.Log("[RechargeMaps] spawn is outside zone " + loader.activeZone + "; loading zone " + (best + 1));
         var load = typeof(ZoneLoader).GetMethod("_LoadZone", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
         if (load != null) load.Invoke(loader, new object[] { best + 1 });
         else loader.LoadZone(best + 1, true);

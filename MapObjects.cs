@@ -64,8 +64,105 @@ internal static class MapObjects
 
     private static int BuildAll(MapWorld w)
     {
-        try { return BuildEach(w); }
-        finally { w.FlushPaint(); MapGroups.HideStarting(w); }
+        try { PaintTileLayers(w); return BuildEach(w); }
+        finally
+        {
+            w.FlushPaint();
+            try { RemapToCopies(w); }
+            catch (Exception e) { Debug.LogWarning("[RechargeMaps] linking copies to each other failed: " + e.Message); }
+            MapGroups.HideStarting(w);
+        }
+    }
+
+    // A copied thing still points at the level's own objects it works with (a credits
+    // trigger at its credits, a box at its door): where those were copied too, it's
+    // pointed at the copy, which is the one in the map.
+    private static void RemapToCopies(MapWorld w)
+    {
+        if (w.Overlay || w.ClonesByPath.Count == 0) return;
+        const BindingFlags any = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
+        UnityEngine.Object CopyOf(UnityEngine.Object value, Type type)
+        {
+            var t = value is GameObject g ? g.transform : (value as Component)?.transform;
+            if (t == null || MapWorld.IsMapObject(t) || !t.gameObject.scene.IsValid()) return null;
+            var path = w.PathOf(t);
+            string best = null;
+            foreach (var key in w.ClonesByPath.Keys)
+                if ((path == key || path.StartsWith(key + "/")) && (best == null || key.Length > best.Length)) best = key;
+            if (best == null || w.ClonesByPath[best] == null) return null;
+            var copy = path == best ? w.ClonesByPath[best].transform : w.ClonesByPath[best].transform.Find(path.Substring(best.Length + 1));
+            if (copy == null) return null;
+            return type == typeof(GameObject) ? copy.gameObject : type == typeof(Transform) ? (UnityEngine.Object)copy : copy.GetComponent(type);
+        }
+        int remapped = 0;
+        foreach (var clone in w.ClonesByPath.Values.Where(c => c != null).Distinct().ToList())
+        {
+            foreach (var mb in clone.GetComponentsInChildren<MonoBehaviour>(true))
+            {
+                if (mb == null || mb is MapUpgradeBox) continue;
+                for (var type = mb.GetType(); type != null && type != typeof(MonoBehaviour); type = type.BaseType)
+                {
+                    if (type.Assembly != typeof(courseScript).Assembly) break;
+                    foreach (var f in type.GetFields(any | BindingFlags.DeclaredOnly))
+                    {
+                        if (!(f.IsPublic || f.IsDefined(typeof(SerializeField), false))) continue;
+                        if (typeof(UnityEngine.Object).IsAssignableFrom(f.FieldType))
+                        {
+                            var copy = CopyOf(f.GetValue(mb) as UnityEngine.Object, f.FieldType);
+                            if (copy != null) { f.SetValue(mb, copy); remapped++; }
+                        }
+                        else if (f.FieldType.IsArray && typeof(UnityEngine.Object).IsAssignableFrom(f.FieldType.GetElementType()) && f.GetValue(mb) is Array arr)
+                        {
+                            for (int i = 0; i < arr.Length; i++)
+                            {
+                                var copy = CopyOf(arr.GetValue(i) as UnityEngine.Object, f.FieldType.GetElementType());
+                                if (copy != null) { arr.SetValue(copy, i); remapped++; }
+                            }
+                        }
+                    }
+                }
+            }
+            // An end-credits trigger's credits play on its area's parallax layer: shown when it fires, wherever it is.
+            if (clone.GetComponentInChildren<EndCreditsTrigger>(true) != null && clone.GetComponent<MapCreditsShow>() == null)
+                clone.AddComponent<MapCreditsShow>().World = w;
+        }
+        Debug.Log("[RechargeMaps] " + remapped + " links between copied things pointed at the copies");
+    }
+
+    // A rebuilt map's tiles: each layer's runs painted at their exact cells, on the
+    // map's copy of that tilemap (its grid a copy of the level's, so cells line up).
+    private static void PaintTileLayers(MapWorld w)
+    {
+        if (w.Def.TileLayers == null) return;
+        var mats = (w.Def.Mats ?? new List<float[]>()).Select(m =>
+        {
+            var matrix = Matrix4x4.identity;
+            if (m != null && m.Length == 4) { matrix.m00 = m[0]; matrix.m01 = m[1]; matrix.m10 = m[2]; matrix.m11 = m[3]; }
+            return matrix;
+        }).ToArray();
+        var started = Time.realtimeSinceStartup;
+        int painted = 0;
+        foreach (var layer in w.Def.TileLayers)
+        {
+            try
+            {
+                var tilemap = w.Tilemap(layer.Tilemap);
+                var tiles = layer.Names.Select(n => RealAssetPalette.GetTileByName(layer.Tilemap, n)).ToArray();
+                for (int i = 0; i < tiles.Length; i++)
+                    if (tiles[i] == null) Debug.LogWarning("[RechargeMaps] no tile '" + layer.Names[i] + "' for '" + layer.Tilemap + "'");
+                var r = layer.Runs;
+                for (int i = 0; i + 4 < r.Length; i += 5)
+                {
+                    var tile = tiles[r[i + 3]];
+                    if (tile == null) continue;
+                    var matrix = r[i + 4] < mats.Length ? mats[r[i + 4]] : Matrix4x4.identity;
+                    for (int n = 0; n < r[i + 2]; n++) w.Paint(tilemap, new Vector3Int(r[i + 1] + n, r[i], 0), tile, matrix);
+                    painted += r[i + 2];
+                }
+            }
+            catch (Exception e) { Debug.LogWarning("[RechargeMaps] tile layer '" + layer.Tilemap + "' failed: " + e.Message); }
+        }
+        Debug.Log("[RechargeMaps] " + painted + " tiles queued in " + Mathf.RoundToInt((Time.realtimeSinceStartup - started) * 1000f) + " ms");
     }
 
     // The overgrown stages' edits wait for MapStages, which builds the set for the level's state.
@@ -247,6 +344,7 @@ internal static class MapObjects
             }
         go.AddComponent<spikeScript>();
         MapGroups.Add(w, obj, go);
+        ShiftOrder(go, obj);
         if (obj["order"] != null) w.Stacked.Add((obj["order"].Value<int>(), go));
         if (obj["behind"]?.Value<bool>() == true) (obj["depth"]?.Value<int>() == 2 ? w.BehindWalls : w.Behind).Add(go);
     }
@@ -267,6 +365,8 @@ internal static class MapObjects
             var media = go.AddComponent<MapMediaTrigger>();
             media.Music = obj["music"];
             media.Background = obj["background"];
+            media.Zone = obj["zone"]?.Value<int>() ?? 0;
+            media.AreaState = obj["a1"]?.Value<int>() ?? -1;
             return;
         }
         if (kind == "kill")
@@ -309,20 +409,30 @@ internal static class MapObjects
         if (sr.flipX) art.transform.localPosition = new Vector3(-art.transform.localPosition.x, art.transform.localPosition.y, 0f);
         if (sr.flipY) art.transform.localPosition = new Vector3(art.transform.localPosition.x, -art.transform.localPosition.y, 0f);
         if (obj["alpha"] != null) sr.color = new Color(1f, 1f, 1f, Mathf.Clamp01(obj["alpha"].Value<float>()));
-        var lit = RealAssetPalette.Get<SpringScript>()?.GetComponentInChildren<SpriteRenderer>(true);
-        if (lit != null) sr.sharedMaterial = lit.sharedMaterial;
-        var deco = w.RealTilemap("ground")?.GetComponent<TilemapRenderer>();
-        if (deco != null) { sr.sortingLayerID = deco.sortingLayerID; sr.sortingOrder = deco.sortingOrder - 1; }
+        LightAndSort(w, obj, sr);
         MapGroups.Add(w, obj, go);
+        ShiftOrder(go, obj);
         if (obj["order"] != null) w.Stacked.Add((obj["order"].Value<int>(), go));
         if (obj["behind"]?.Value<bool>() == true) (obj["depth"]?.Value<int>() == 2 ? w.BehindWalls : w.Behind).Add(go);
     }
 
     // One of the map's own images, placed like a decoration.
+    // Lit by the level's lights like its own art, and drawn where the editor drew it: at its own
+    // draw order when the map gives one, else like the level's decorations (just behind the ground).
+    private static void LightAndSort(MapWorld w, JObject obj, SpriteRenderer sr)
+    {
+        var lit = RealAssetPalette.Get<SpringScript>()?.GetComponentInChildren<SpriteRenderer>(true);
+        if (lit != null) sr.sharedMaterial = lit.sharedMaterial;
+        var deco = w.RealTilemap("ground")?.GetComponent<TilemapRenderer>();
+        if (deco != null) sr.sortingLayerID = deco.sortingLayerID;
+        if (obj["drawOrder"] != null) sr.sortingOrder = obj["drawOrder"].Value<int>();
+        else if (deco != null) sr.sortingOrder = deco.sortingOrder - 1;
+    }
+
     private static void SpawnCustomSprite(MapWorld w, JObject obj)
     {
         var file = obj["image"]?.Value<string>();
-        var sprite = (file != null ? MapMedia.LoadImage(file, false) : null) ?? throw new Exception("no image '" + file + "' in the map's assets");
+        var sprite = (file != null ? MapMedia.LoadImage(file, false, w.MapId) : null) ?? throw new Exception("no image '" + file + "' in the map's assets");
         var go = new GameObject("Image_" + file);
         go.transform.SetParent(w.Root, false);
         go.transform.SetPositionAndRotation(w.Point(obj), MapWorld.Rot(obj));
@@ -333,10 +443,9 @@ internal static class MapObjects
         sr.flipX = obj["flipX"]?.Value<bool>() ?? false;
         sr.flipY = obj["flipY"]?.Value<bool>() ?? false;
         if (obj["alpha"] != null) sr.color = new Color(1f, 1f, 1f, Mathf.Clamp01(obj["alpha"].Value<float>()));
-        // Drawn like the level's decorations: in front of the walls, behind the ground.
-        var deco = w.RealTilemap("ground")?.GetComponent<TilemapRenderer>();
-        if (deco != null) { sr.sortingLayerID = deco.sortingLayerID; sr.sortingOrder = deco.sortingOrder - 1; }
+        LightAndSort(w, obj, sr);
         MapGroups.Add(w, obj, go);
+        ShiftOrder(go, obj);
         if (obj["order"] != null) w.Stacked.Add((obj["order"].Value<int>(), go));
         if (obj["behind"]?.Value<bool>() == true) (obj["depth"]?.Value<int>() == 2 ? w.BehindWalls : w.Behind).Add(go);
     }
@@ -362,6 +471,7 @@ internal static class MapObjects
         if (go.transform is RectTransform rect && scale.x != 0f && scale.y != 0f)
             rect.sizeDelta = new Vector2((obj["width"]?.Value<float>() ?? rect.sizeDelta.x * scale.x) / scale.x, (obj["height"]?.Value<float>() ?? rect.sizeDelta.y * scale.y) / scale.y);
         MapGroups.Add(w, obj, go);
+        ShiftOrder(go, obj);
         if (obj["order"] != null) w.Stacked.Add((obj["order"].Value<int>(), go));
         if (obj["behind"]?.Value<bool>() == true) (obj["depth"]?.Value<int>() == 2 ? w.BehindWalls : w.Behind).Add(go);
     }
@@ -375,7 +485,22 @@ internal static class MapObjects
     {
         var path = obj["path"]?.Value<string>();
         var source = w.FindSceneObject(path, MapWorld.SourcePoint(obj)) ?? throw new Exception("no scene object at '" + path + "' to copy");
-        var clone = UnityEngine.Object.Instantiate(source.gameObject, w.Point(obj), source.rotation, w.Root);
+        GameObject clone;
+        if (obj["world"]?.Value<bool>() == true)
+        {
+            // A whole level thing: under a stand-in for its parent, so it keeps its size, turn
+            // and anything that works from its parent (a parallax layer).
+            // Made under a switched-off holder: nothing in it wakes up before its cut children are gone.
+            clone = UnityEngine.Object.Instantiate(source.gameObject, w.Staging, false);
+            Prune(clone, obj);
+            MapFakeCredits.Replace(clone, obj["credits"]?.Value<string>() ?? (obj["vmanOnly"]?.Value<bool>() == true ? "vman" : "game"));
+            clone.transform.SetParent(w.ParentLike(source.parent), false);
+            clone.transform.position = w.Point(obj);
+            // Parallax layers follow the camera anywhere: only shown while their area is the loaded one, as in the level.
+            if (clone.GetComponentInChildren<ParallaxController>(true) != null) w.KeepToZone(clone, source);
+            else w.KeepLightsToZone(clone, source);
+        }
+        else clone = UnityEngine.Object.Instantiate(source.gameObject, w.Point(obj), source.rotation, w.Root);
         clone.name = source.name;
         if (!string.IsNullOrEmpty(path)) w.ClonesByPath[path] = clone;
         var doorPath = obj["door"]?.Value<string>();
@@ -387,14 +512,152 @@ internal static class MapObjects
             clone.transform.position = new Vector3(at.x, at.y, at.z - 0.01f * obj["order"].Value<int>());
         }
         clone.SetActive(true);
+        HidePrestigeTexts(w, clone);
+        HideCourseNumber(clone);
+        if (w.ZoneOnly.Exists(z => z.go == clone)) w.ShowZone(Singleton<ZoneLoader>.Instance != null ? Singleton<ZoneLoader>.Instance.activeZone : 0);
+        ShiftOrder(clone, obj);
         MapGroups.Add(w, obj, clone);
         if (obj["order"] != null) w.Stacked.Add((obj["order"].Value<int>(), clone));
         if (obj["behind"]?.Value<bool>() == true) (obj["depth"]?.Value<int>() == 2 ? w.BehindWalls : w.Behind).Add(clone);
         var course = obj["course"]?.Value<string>();
         if (!string.IsNullOrEmpty(course)) w.Links.Add((clone, course));
         if (obj["teleport"] is JObject teleport) w.Teleports.Add((clone, teleport));
+        if (obj["levelUpgrade"] is JObject levelUpgrade) MapUpgrades.OverrideBox(clone, levelUpgrade);
         try { MapCloneConfig.Apply(clone, obj); }
         catch (Exception e) { Debug.LogWarning("[RechargeMaps] settings for '" + path + "' failed: " + e.Message); }
+        if (obj["absolute"]?.Value<bool>() == true && obj["scale"] != null)
+            Debug.Log("[RechargeMaps] scaled clone '" + path + "': editor x,y " + obj["x"] + "," + obj["y"] + " scale " + obj["scale"].ToString(Newtonsoft.Json.Formatting.None) + "; placed at " + MapWorld.LevelOf(clone.transform.position) + " (level space), world scale " + (Vector2)clone.transform.lossyScale);
+    }
+
+    // The level's course number plate ("ONE", the entry panel's CourseNumber text) is the
+    // level's own course 1 sign; the editor draws only the panel, so a copy shows none.
+    private static void HideCourseNumber(GameObject clone)
+    {
+        foreach (var text in clone.GetComponentsInChildren<TMPro.TMP_Text>(true))
+            if (text.name == "CourseNumber") text.gameObject.SetActive(false);
+    }
+
+    // A copied unit's children that are copied on their own (cut) go; those of one area-1
+    // state are switched for the map's (toggles). Both by sibling-index paths ("2/0").
+    // The statues' prestige text never shows in a map: the level's own, and copies in older map files.
+    public static void DropPrestigeTexts(MapWorld w)
+    {
+        foreach (var t in Resources.FindObjectsOfTypeAll<Transform>())
+        {
+            if (t == null || t.name != "StatuePrestigeText" || !t.gameObject.scene.IsValid()) continue;
+            w.SetActive(t.gameObject, false);
+            w.KeepHidden(t.gameObject);
+        }
+    }
+
+    // The same for a copy spawned after DropPrestigeTexts ran (a stage's statue): its own text stays off.
+    private static void HidePrestigeTexts(MapWorld w, GameObject clone)
+    {
+        foreach (var t in clone.GetComponentsInChildren<Transform>(true))
+        {
+            if (t.name != "StatuePrestigeText") continue;
+            t.gameObject.SetActive(false);
+            w.KeepHidden(t.gameObject);
+        }
+    }
+
+    // The editor's draw order for a thing: its renderers' (and UI canvases') sorting
+    // orders shifted together by orderDelta, keeping their order among themselves.
+    public static void ShiftOrder(GameObject go, JObject obj)
+    {
+        var delta = obj["orderDelta"]?.Value<int>() ?? 0;
+        if (delta == 0 || go == null) return;
+        foreach (var r in go.GetComponentsInChildren<Renderer>(true)) r.sortingOrder += delta;
+        foreach (var c in go.GetComponentsInChildren<Canvas>(true)) if (c.isRootCanvas || c.overrideSorting) c.sortingOrder += delta;
+    }
+
+    public static void Prune(GameObject clone, JObject obj)
+    {
+        Transform At(string steps)
+        {
+            var t = clone.transform;
+            foreach (var step in steps.Split('/'))
+            {
+                if (t == null || !int.TryParse(step, out var i) || i < 0 || i >= t.childCount) return null;
+                t = t.GetChild(i);
+            }
+            return t;
+        }
+        if (obj["toggles"] is JObject toggles)
+            foreach (var pair in toggles)
+                At(pair.Key)?.gameObject.SetActive(pair.Value.Value<bool>());
+        if (obj["cut"] is JArray cut)
+        {
+            // Resolved first: removing one child renumbers its siblings.
+            var gone = cut.Select(c => At(c.Value<string>())).Where(t => t != null).ToList();
+            foreach (var t in gone) UnityEngine.Object.DestroyImmediate(t.gameObject);
+        }
+    }
+
+    // A copy's script references to its own children, by their hierarchy path in the level:
+    // taken before Prune cuts some of those children out (they're copied on their own).
+    // (Arrays too: index is the element, -1 a plain field.)
+    public static List<(Component owner, FieldInfo field, string levelPath, int index)> InnerRefs(GameObject clone, string levelPath)
+    {
+        const BindingFlags any = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
+        var refs = new List<(Component, FieldInfo, string, int)>();
+        string PathOf(UnityEngine.Object value)
+        {
+            var target = value is GameObject g ? g.transform : (value as Component)?.transform;
+            if (target == null || target == clone.transform || !target.IsChildOf(clone.transform)) return null;
+            var names = new List<string>();
+            for (var t = target; t != clone.transform; t = t.parent) names.Insert(0, t.name);
+            return levelPath + "/" + string.Join("/", names);
+        }
+        foreach (var mb in clone.GetComponentsInChildren<MonoBehaviour>(true))
+        {
+            if (mb == null) continue;
+            for (var type = mb.GetType(); type != null && type != typeof(MonoBehaviour); type = type.BaseType)
+            {
+                foreach (var f in type.GetFields(any | BindingFlags.DeclaredOnly))
+                {
+                    if (!(f.IsPublic || f.IsDefined(typeof(SerializeField), false))) continue;
+                    if (typeof(UnityEngine.Object).IsAssignableFrom(f.FieldType))
+                    {
+                        var p = PathOf(f.GetValue(mb) as UnityEngine.Object);
+                        if (p != null) refs.Add((mb, f, p, -1));
+                    }
+                    else if (f.FieldType.IsArray && typeof(UnityEngine.Object).IsAssignableFrom(f.FieldType.GetElementType()) && f.GetValue(mb) is Array arr)
+                    {
+                        for (int i = 0; i < arr.Length; i++)
+                        {
+                            var p = PathOf(arr.GetValue(i) as UnityEngine.Object);
+                            if (p != null) refs.Add((mb, f, p, i));
+                        }
+                    }
+                }
+            }
+        }
+        return refs;
+    }
+
+    // References whose target was cut from the copy, pointed at the same thing in its own copy.
+    public static int Relink(MapWorld w, List<(Component owner, FieldInfo field, string levelPath, int index)> refs)
+    {
+        int linked = 0;
+        foreach (var (owner, field, levelPath, index) in refs)
+        {
+            if (owner == null) continue;
+            var arr = index >= 0 ? field.GetValue(owner) as Array : null;
+            if (index >= 0 ? arr == null || index >= arr.Length || arr.GetValue(index) as UnityEngine.Object != null : field.GetValue(owner) as UnityEngine.Object != null) continue;
+            var type = index >= 0 ? field.FieldType.GetElementType() : field.FieldType;
+            string best = null;
+            foreach (var key in w.ClonesByPath.Keys)
+                if ((levelPath == key || levelPath.StartsWith(key + "/")) && (best == null || key.Length > best.Length)) best = key;
+            if (best == null || w.ClonesByPath[best] == null) continue;
+            var t = levelPath == best ? w.ClonesByPath[best].transform : w.ClonesByPath[best].transform.Find(levelPath.Substring(best.Length + 1));
+            if (t == null) continue;
+            object value = type == typeof(GameObject) ? (object)t.gameObject : type == typeof(Transform) ? t : t.GetComponent(type);
+            if (value == null) continue;
+            if (index >= 0) arr.SetValue(value, index); else field.SetValue(owner, value);
+            linked++;
+        }
+        return linked;
     }
 
     private static Transform LevelObject(MapWorld w, JObject obj)
@@ -408,8 +671,8 @@ internal static class MapObjects
         var target = LevelObject(w, obj).gameObject;
         // A refresher is several sprites (its wings, its dotted recharging outline): hide all of it.
         var refresher = target.GetComponentInParent<JiggleDropScript>(true);
-        if (refresher != null) { w.SetActive(refresher.gameObject, false); return; }
-        if (obj["rendererOnly"]?.Value<bool>() != true) { w.SetActive(target, false); return; }
+        if (refresher != null) { w.SetActive(refresher.gameObject, false); w.KeepHidden(refresher.gameObject); return; }
+        if (obj["rendererOnly"]?.Value<bool>() != true) { w.SetActive(target, false); w.KeepHidden(target); return; }
         var sr = target.GetComponent<SpriteRenderer>() ?? throw new Exception("no sprite to hide");
         var shown = sr.enabled;
         sr.enabled = false;

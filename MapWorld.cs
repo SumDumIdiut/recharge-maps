@@ -36,6 +36,7 @@ internal class MapWorld
     // Custom maps are laid out in the editor's level space and moved to the
     // pocket: level point + Shift is where it sits. (Overlays: no shift.)
     private readonly Vector2 _shift;
+    public Vector2 Shift => _shift;
     private const float EditorOffsetY = 9f;
 
     // Collected while objects spawn, resolved once everything exists.
@@ -44,6 +45,8 @@ internal class MapWorld
     public readonly Dictionary<string, Sprite> CustomImages = new Dictionary<string, Sprite>();
     // Placed objects and free spikes with their place in the editor's stack.
     public readonly List<(int order, GameObject go)> Stacked = new List<(int, GameObject)>();
+    // What the stack has placed so far, for things built later to go among.
+    public readonly List<(int order, GameObject go)> Layered = new List<(int, GameObject)>();
     // Put behind the level in the editor: drawn under its ground and objects.
     public readonly HashSet<GameObject> Behind = new HashSet<GameObject>();
     // Further back: under every level tile layer, the walls included.
@@ -122,6 +125,21 @@ internal class MapWorld
         _undo.Clear();
     }
 
+    // A level thing the map took out stays out: the game's own scripts switch some back on
+    // (the statue's prestige text, when its box is bought).
+    private MapHiddenKeeper _keeper;
+    public void KeepHidden(GameObject go)
+    {
+        if (go == null) return;
+        if (_keeper == null)
+        {
+            _keeper = _mainRoot.gameObject.AddComponent<MapHiddenKeeper>();
+            var keeper = _keeper;
+            OnUnload(() => { if (keeper != null) keeper.Hidden.Clear(); });
+        }
+        _keeper.Hidden.Add(go);
+    }
+
     public void SetActive(GameObject go, bool active)
     {
         if (go == null || go.activeSelf == active) return;
@@ -155,8 +173,24 @@ internal class MapWorld
     // The tilemap a map tile named `name` is painted on.
     public Tilemap Tilemap(string name)
     {
+        var cut = name.IndexOf('#');
+        if (cut > 0) return Uncollidable(name, name.Substring(0, cut));
         if (!Overlay) return OwnTilemap(name, name);
         return RealTilemap(name) ?? throw new Exception("no '" + name + "' tilemap in this scene");
+    }
+
+    // "<tilemap>#ghost": a copy of that tilemap drawn just like it that nothing collides with
+    // (tiles the editor painted with collision off).
+    private Tilemap Uncollidable(string name, string template)
+    {
+        var fresh = !_own.TryGetValue(name, out var had) || had == null;
+        var tm = OwnTilemap(name, template);
+        if (fresh)
+        {
+            foreach (var c in tm.GetComponents<Collider2D>()) c.enabled = false;
+            foreach (var e in tm.GetComponents<Effector2D>()) e.enabled = false;
+        }
+        return tm;
     }
 
     // A tilemap of the map's own, made like the game's `template` tilemap (and
@@ -213,6 +247,86 @@ internal class MapWorld
         if (real != null && (tilemapName.StartsWith("orange") || tilemapName.StartsWith("blue")))
             go.AddComponent<MapSwapFollower>().Follow = real;
         _holders[tilemapName] = go.transform;
+        return go.transform;
+    }
+
+    // Stand-ins for level objects' parents, so a copy placed under one keeps its world
+    // size and turn: at the parent's place moved into the map, turned and scaled like it.
+    private readonly Dictionary<Transform, Transform> _parents = new Dictionary<Transform, Transform>();
+    // Copies that only show while the level area their original belongs to is loaded.
+    public readonly List<(GameObject go, int zone)> ZoneOnly = new List<(GameObject, int)>();
+    public void KeepToZone(GameObject clone, Transform source)
+    {
+        var zone = ZoneOf(source);
+        if (zone == 0) return;
+        ZoneOnly.Add((clone, zone));
+        clone.SetActive(Singleton<ZoneLoader>.Instance.activeZone == zone);
+    }
+
+    // A level area's lights shine only while it's the loaded one: a big one (the sunbeam
+    // down the shaft into area 2) would otherwise light, and shadow, the next area too.
+    public readonly List<(UnityEngine.Rendering.Universal.Light2D light, int zone)> ZoneLights = new List<(UnityEngine.Rendering.Universal.Light2D, int)>();
+    public void KeepLightsToZone(GameObject clone, Transform source)
+    {
+        var lights = clone.GetComponentsInChildren<UnityEngine.Rendering.Universal.Light2D>(true);
+        if (lights.Length == 0) return;
+        var zone = ZoneOf(source);
+        if (zone == 0) return;
+        foreach (var light in lights)
+        {
+            ZoneLights.Add((light, zone));
+            light.enabled = Singleton<ZoneLoader>.Instance.activeZone == zone;
+        }
+    }
+
+    // The level area (ZoneLoader's 1-based zone) a level object belongs to, or 0.
+    private static int ZoneOf(Transform source)
+    {
+        var loader = Singleton<ZoneLoader>.Instance;
+        var zones = loader != null ? Reflect.GetField<GameObject[]>(loader, "allZones") : null;
+        if (zones == null) return 0;
+        for (int i = 0; i < zones.Length; i++)
+            if (zones[i] != null && source.IsChildOf(zones[i].transform)) return i + 1;
+        return 0;
+    }
+
+    public void ShowZone(int zone)
+    {
+        foreach (var (go, z) in ZoneOnly) if (go != null) go.SetActive(z == zone);
+        foreach (var (light, z) in ZoneLights) if (light != null) light.enabled = z == zone;
+    }
+
+    private Transform _staging;
+    public Transform Staging
+    {
+        get
+        {
+            if (_staging != null) return _staging;
+            var go = new GameObject("Staging");
+            go.SetActive(false);
+            go.transform.SetParent(_mainRoot, false);
+            return _staging = go.transform;
+        }
+    }
+
+    public Transform ParentLike(Transform real)
+    {
+        if (real == null) return Root;
+        if (_parents.TryGetValue(real, out var made) && made != null) return made;
+        var go = new GameObject("Parent_" + real.name);
+        go.transform.SetParent(Root, true);
+        // The parent's actual 2D placement, from its world matrix: rotation and lossyScale
+        // disagree with it once a mirrored parent sits above a turned one (the copy came out
+        // turned half way round). As a turn plus a scale whose sign carries the mirroring.
+        var m = real.localToWorldMatrix;
+        float a = m.m00, b = m.m01, c = m.m10, d = m.m11;
+        var sx = Mathf.Sqrt(a * a + c * c);
+        var sy = sx > 1e-6f ? (a * d - b * c) / sx : Mathf.Sqrt(b * b + d * d);
+        var turn = sx > 1e-6f ? Mathf.Atan2(c, a) * Mathf.Rad2Deg : 0f;
+        go.transform.SetPositionAndRotation(Live(LevelOf(real.position) + _shift), Quaternion.Euler(0f, 0f, turn));
+        var sz = real.lossyScale.z;
+        go.transform.localScale = new Vector3(sx, sy, sz == 0f ? 1f : Mathf.Abs(sz));
+        _parents[real] = go.transform;
         return go.transform;
     }
 
@@ -284,6 +398,14 @@ internal class MapWorld
                 OnUnload(() => { if (tilemap != null) tilemap.SetTiles(old, true); });
             }
             tilemap.SetTiles(changes, true);
+            // A tile asset can lock its transform (and colour): a refresh would turn a rotated
+            // spike back. The level's own cells have those locks off; so do the map's.
+            foreach (var c in changes)
+            {
+                if (c.transform == Matrix4x4.identity) continue;
+                tilemap.SetTileFlags(c.position, TileFlags.None);
+                tilemap.SetTransformMatrix(c.position, c.transform);
+            }
         }
         _pending.Clear();
     }
@@ -399,6 +521,8 @@ internal class MapWorld
         return best;
     }
 
+    public string PathOf(Transform t) => HierarchyPath(t);
+
     private readonly Dictionary<Transform, string> _paths = new Dictionary<Transform, string>();
     private string HierarchyPath(Transform t)
     {
@@ -424,6 +548,16 @@ internal class MapWorld
         foreach (var (field, active) in new[] { ("overgrowthEnable", overgrown), ("overgrowthDisable", !overgrown) })
             foreach (var go in Reflect.GetField<GameObject[]>(loader, field) ?? Array.Empty<GameObject>())
                 SetActive(go, active);
+    }
+}
+
+internal class MapHiddenKeeper : MonoBehaviour
+{
+    public readonly List<GameObject> Hidden = new List<GameObject>();
+
+    private void LateUpdate()
+    {
+        foreach (var go in Hidden) if (go != null && go.activeSelf) go.SetActive(false);
     }
 }
 

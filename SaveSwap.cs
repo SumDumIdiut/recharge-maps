@@ -26,6 +26,19 @@ internal static class SaveSwap
 
     public static bool IsSwapped => Directory.Exists(Full(Game) + HoldSuffix) || File.Exists(Full(Game) + Marker);
 
+    // For logs: whether a folder holds a save, and which course files it has.
+    public static string Describe(string folder)
+    {
+        try
+        {
+            var dir = Full(folder);
+            if (!Directory.Exists(dir)) return folder + ": missing";
+            var courses = Directory.GetFiles(dir, "course*data.txt").Length;
+            return folder + ": playerdata " + (File.Exists(dir + "/playerdata.txt") ? "yes" : "no") + ", " + courses + " course files" + (File.Exists(dir + Marker) ? ", swapped copy" : "");
+        }
+        catch (Exception e) { return folder + ": " + e.Message; }
+    }
+
     // Puts the map save in `folder` (and folder+"backup") where the game loads
     // from. `folder` null or empty means a brand-new game.
     public static void SwapIn(string folder)

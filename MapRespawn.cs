@@ -23,9 +23,20 @@ internal static class MapRespawn
         _hadBlockSwap = mv.blockSwapUnlocked;
 
         var dead = Reflect.GetField<bool>(mv, "isDead");
-        if (dead && !_wasDead) Debug.Log("[RechargeMaps] died at " + Level(mv.transform.position) + "; respawn point " + mv.respawnPoint);
+        if (dead && !_wasDead)
+        {
+            // Movement.respawn's own choice: the course reset point unless the Checkpoints setting is on.
+            var toCourse = !mv.isRespawningAtCheckpoints && mv.courseResetPoint != Vector2.zero;
+            Debug.Log("[RechargeMaps] died at " + Level(mv.transform.position) + "; respawns at the " + (toCourse ? "course reset point " + (mv.courseResetPoint - (Vector2)FloatingOriginOffset()) : "checkpoint " + mv.respawnPoint) + " (Checkpoints setting " + (mv.isRespawningAtCheckpoints ? "on" : "off") + ")");
+        }
         if (!dead && _wasDead) Debug.Log("[RechargeMaps] respawned at " + Level(mv.transform.position));
         _wasDead = dead;
+    }
+
+    private static Vector3 FloatingOriginOffset()
+    {
+        var fo = Singleton<FloatingOrigin>.Instance;
+        return fo != null ? (Vector3)fo.currentOrigin : Vector3.zero;
     }
 
     private static Vector2 Level(Vector3 live)

@@ -165,10 +165,12 @@ internal static class RealAssetPalette
     private static void EnsurePalette(string name)
     {
         if (string.IsNullOrEmpty(name) || TilePalettes.ContainsKey(name) || Missing.Contains(name)) return;
+        // The level's own tilemap (never a map's copy of it, which starts empty), the live world's first.
         Tilemap found = null;
         foreach (var tm in Resources.FindObjectsOfTypeAll<Tilemap>())
         {
-            if (tm.gameObject.scene.IsValid() && MatchesTilemap(tm.gameObject.name, name)) { found = tm; break; }
+            if (!tm.gameObject.scene.IsValid() || MapWorld.IsMapObject(tm.transform) || tm.transform.IsChildOf(Holder.transform) || !MatchesTilemap(tm.gameObject.name, name)) continue;
+            if (found == null || MapWorld.SceneRank(tm.transform) > MapWorld.SceneRank(found.transform)) found = tm;
         }
         if (found == null) { Missing.Add(name); return; }
         var used = new TileBase[found.GetUsedTilesCount()];
@@ -458,6 +460,8 @@ internal static class RealAssetPalette
 
     public static TileBase GetTileByName(string tilemapName, string tileName)
     {
+        var cut = tilemapName?.IndexOf('#') ?? -1;
+        if (cut > 0) tilemapName = tilemapName.Substring(0, cut);
         EnsurePalette(tilemapName);
         if (!TilePalettes.TryGetValue(tilemapName, out var tiles)) return null;
         return tiles.FirstOrDefault(t => t.name == tileName) ?? LooseTile(tileName);

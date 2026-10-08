@@ -124,6 +124,41 @@ internal static class MapMedia
         if (outgoing != null) { outgoing.volume = 0f; outgoing.Stop(); }
     }
 
+    // Arriving somewhere that has an area: { zone, music, background } - each only if given.
+    public static void ApplyArea(JObject area, bool now = false)
+    {
+        if (area == null) return;
+        var zone = area["zone"]?.Value<int>() ?? 0;
+        if (zone > 0) LoadArea(zone, now);
+        if (area["music"] != null) PlayMusic(area["music"]);
+        if (area["background"] != null) ShowBackground(area["background"]);
+    }
+
+    // One of the level's areas loaded the way its own doors do it: its background, lights
+    // and courses' screens come on (and the other areas' go off).
+    public static void LoadArea(int zone, bool now = false)
+    {
+        var loader = Singleton<ZoneLoader>.Instance;
+        if (loader == null || zone < 1) return;
+        loader.LoadZone(zone, now);
+    }
+
+    // The game's area backgrounds follow the camera at a fraction of its position, which
+    // only lines up near the level: in a rebuilt map's place they're moved as if the
+    // camera were at the same spot of the level.
+    public static void ShiftBackgrounds(MapWorld w)
+    {
+        if (w.Overlay) return;
+        foreach (var bg in Resources.FindObjectsOfTypeAll<backgroundScroller>())
+        {
+            if (bg == null || !bg.gameObject.scene.IsValid() || bg.GetComponent<MapBackgroundShift>() != null) continue;
+            var shift = bg.gameObject.AddComponent<MapBackgroundShift>();
+            shift.Scroller = bg;
+            shift.Offset = w.Shift;
+            w.OnUnload(() => { if (shift != null) UnityEngine.Object.Destroy(shift); });
+        }
+    }
+
     public static void ShowBackground(JToken choice)
     {
         var bg = choice as JObject;
@@ -155,9 +190,9 @@ internal static class MapMedia
     }
 
     // One unit per pixel, as the editor measures them.
-    public static Sprite LoadImage(string file, bool repeat)
+    public static Sprite LoadImage(string file, bool repeat, string mapId = null)
     {
-        var path = AssetPath(file);
+        var path = AssetPath(file, mapId);
         if (Images.TryGetValue(path + repeat, out var cached) && cached != null) return cached;
         try
         {
@@ -174,7 +209,8 @@ internal static class MapMedia
         }
     }
 
-    private static string AssetPath(string file) => Path.Combine(MapPaths.MapsDir, _world?.MapId ?? "", "assets", file);
+    // The map's own (mapId), or the one playing: objects load theirs before the map is playing.
+    private static string AssetPath(string file, string mapId = null) => Path.Combine(MapPaths.MapsDir, mapId ?? _world?.MapId ?? "", "assets", file);
 }
 
 // Keeps a map background filling the view: it drifts with the camera by its
@@ -208,11 +244,43 @@ internal class MapMediaTrigger : MonoBehaviour
 {
     public JToken Music;
     public JToken Background;
+    // A level area to load (1-3, 0: none), and area 1's state to set (-1: none).
+    public int Zone;
+    public int AreaState = -1;
 
     private void OnTriggerEnter2D(Collider2D collision)
     {
         if (!collision.gameObject.CompareTag("Player")) return;
+        if (AreaState >= 0 && Singleton<globalStats>.Instance != null) Singleton<globalStats>.Instance.currentA1State = (globalStats.area1states)AreaState;
+        if (Zone > 0) MapMedia.LoadArea(Zone);
         if (Music != null) MapMedia.PlayMusic(Music);
         if (Background != null) MapMedia.ShowBackground(Background);
+    }
+}
+
+// After the game's backgroundScroller has placed its background for the frame: put
+// where it would be with the camera at the same spot of the level - the game's
+// camera * parallax, measured from the level's origin instead of the map's place.
+[DefaultExecutionOrder(10000)]
+internal class MapBackgroundShift : MonoBehaviour
+{
+    public backgroundScroller Scroller;
+    public Vector2 Offset;
+
+    private bool _told;
+
+    private void LateUpdate()
+    {
+        if (Scroller == null || Scroller.cam == null) return;
+        if (!_told)
+        {
+            _told = true;
+            var r = GetComponent<SpriteRenderer>();
+            Debug.Log("[RechargeMaps] area background '" + name + "' follows the map (parallax " + Scroller.parallaxFactorX + ", " + Scroller.parallaxFactorY + ")" + (r != null ? " size " + r.bounds.size + " order " + r.sortingLayerName + "/" + r.sortingOrder : ""));
+        }
+        var cam = Scroller.cam.position;
+        var from = (Vector2)MapWorld.Live(Offset);
+        transform.position = new Vector3(cam.x * Scroller.parallaxFactorX + (1f - Scroller.parallaxFactorX) * from.x,
+            cam.y * Scroller.parallaxFactorY + (1f - Scroller.parallaxFactorY) * from.y, transform.position.z);
     }
 }

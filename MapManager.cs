@@ -15,6 +15,16 @@ internal class MapManager : MonoBehaviour
     // The map loaded right now, or null in Base Game.
     public static string CurrentMapId => Instance?._world?.MapId;
 
+    // Raised once a map load is over: built, or given up on. The door transition opens on it.
+    public static event Action MapReady;
+    // A map is chosen and not built yet.
+    public static bool Pending => Instance != null && Instance._pendingMapId != null;
+    private static void SignalReady()
+    {
+        try { MapReady?.Invoke(); }
+        catch (Exception e) { Debug.LogWarning("[RechargeMaps] map-ready listener failed: " + e.Message); }
+    }
+
     private MapWorld _world;
     private string _pendingMapId;
     private Coroutine _pendingRoutine;
@@ -55,9 +65,19 @@ internal class MapManager : MonoBehaviour
     {
         if (menu == null) { Debug.LogWarning("[RechargeMaps] no pause menu to change scene with - can't play '" + mapId + "'"); return; }
         var def = MapDefinition.Read(mapId);
-        MapSaves.BeginMapScene(mapId, def?.Player, asNewGame);
-        _pendingMapId = mapId;
-        menu.changeScene();
+        // The doors close, the scene loads and the map is built behind them; the game's own
+        // changeScene is the fallback. The save and pending map are set up before the scene goes.
+        DoorTransition.Run(menu, false, () =>
+        {
+            MapSaves.BeginMapScene(mapId, def?.Player, asNewGame);
+            _pendingMapId = mapId;
+        });
+    }
+
+    // Back to Base Game / B-side from a map: the map is saved and released as the doors close.
+    public static void LeaveTo(pauseMenuScript menu, bool hard)
+    {
+        DoorTransition.Run(menu, hard, () => { MapSaves.SaveForSceneChange(); MapSaves.LeaveMap(); });
     }
 
     // The gameplay Player moves itself to its save's respawn point as it
@@ -65,15 +85,34 @@ internal class MapManager : MonoBehaviour
     private System.Collections.IEnumerator LoadWhenPlayerReady()
     {
         float waited = 0f;
+        // The map this coroutine is loading, fixed now: _pendingMapId is cleared once
+        // the save scene has been set up, and that can happen before the Player is ready.
+        var want = _pendingMapId;
         while (true)
         {
-            var movement = MapUpgrades.GamePlayer();
+            // Unity keeps ticking frames while a scene loads, and the incoming Player
+            // can be found during that window - before sceneLoaded fires and MapSaves
+            // has put the map's save in place. Building then would run the map on
+            // Base Game progress: its money, its abilities, and no save of its own.
+            var saveInPlace = want != null && MapSaves.ActiveMapId == want;
+            var movement = saveInPlace ? MapUpgrades.GamePlayer() : null;
             if (movement != null && !Reflect.GetField<bool>(movement, "isOnMainMenu") && (!Reflect.GetField<bool>(movement, "init") || (MapSaves.StartedFresh && waited > 0.5f))) break;
+            // Nothing left to load into: the scene change went somewhere else.
+            if (want != null && !saveInPlace && _pendingMapId == null && MapSaves.ActiveMapId == null)
+            {
+                Debug.LogWarning("[RechargeMaps] stopped waiting for '" + want + "': the scene changed without it");
+                _pendingRoutine = null;
+                MapSaves.ReleaseSave();
+                SignalReady();
+                yield break;
+            }
             if (waited > 60f)
             {
-                Debug.LogWarning("[RechargeMaps] gave up waiting for a gameplay Player to load '" + _pendingMapId + "' into");
+                Debug.LogWarning("[RechargeMaps] gave up waiting for a gameplay Player to load '" + want + "' into");
                 _pendingMapId = null;
                 _pendingRoutine = null;
+                MapSaves.ReleaseSave();
+                SignalReady();
                 yield break;
             }
             yield return null;
@@ -81,14 +120,16 @@ internal class MapManager : MonoBehaviour
         }
         yield return null;
         yield return null;
-        var mapId = _pendingMapId;
         _pendingMapId = null;
         _pendingRoutine = null;
-        LoadMap(mapId);
+        LoadMap(want);
+        SignalReady();
     }
 
     private void LoadMap(string mapId)
     {
+        // Everything loading from a save is done: the real save goes back from here on.
+        MapSaves.ReleaseSave();
         var def = MapDefinition.Read(mapId);
         if (def == null) return;
         if (def.Groups == null || def.Groups.Count == 0) { Debug.LogError("[RechargeMaps] map has no groups: " + mapId); return; }
@@ -106,10 +147,18 @@ internal class MapManager : MonoBehaviour
             _world = w;
             // A map with stage edits follows the game's own area-1 state; others show the one they were made in.
             if (w.Overlay && !def.Stages) w.ApplyBaseState(def.BaseState);
+            // A rebuilt level: area 1 in the state it was made in, and the area it starts in loaded.
+            if (!w.Overlay && def.AreaState == "overgrown" && Singleton<globalStats>.Instance != null) Singleton<globalStats>.Instance.currentA1State = globalStats.area1states.Overgrown;
             var built = MapObjects.Build(w);
+            if (!w.Overlay && def.StartZone > 0) MapMedia.LoadArea(def.StartZone, true);
+            _zone = -1;
+            MapMedia.ShiftBackgrounds(w);
             MapStages.Start(w);
             MapCourses.Build(w);
+            MapObjects.DropPrestigeTexts(w);
             MapMedia.Start(w, this);
+            // The area the player starts in: its background, lights and music.
+            if (!w.Overlay) MapMedia.ApplyArea(w.Group.SpawnArea, true);
             MapSpawn.Place(w, this);
             StartCoroutine(RefreshersNextFrame(w));
             if (newGame && w.Overlay) StartCoroutine(ShowTutorialGlyphs());
@@ -153,7 +202,7 @@ internal class MapManager : MonoBehaviour
         if (_world != null) MapStages.Tick(_world);
         if (_world != null) MapSpawn.TickSwitcher(_world, this);
         var zone = Singleton<ZoneLoader>.Instance != null ? Singleton<ZoneLoader>.Instance.activeZone : 0;
-        if (_world != null && zone != _zone) StartCoroutine(RefreshersNextFrame(_world));
+        if (_world != null && zone != _zone) { StartCoroutine(RefreshersNextFrame(_world)); _world.ShowZone(zone); }
         _zone = zone;
     }
 
