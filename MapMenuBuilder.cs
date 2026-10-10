@@ -81,8 +81,7 @@ internal static class MapMenuBuilder
         public RectTransform DeleteSave;
         public RectTransform Settings;
         public GameObject[] Slots; // up to RowsPerPage map rows, reused across picker pages
-        public GameObject PagerRow;
-        public GameObject PageButton;
+        public GameObject[] PagerParts; // [0] "<" prev, [1] "n / m" centre (next), [2] ">" next
         public RectTransform Quit; // doubles as the picker's Back row
         public Button QuitButton;
         public Button.ButtonClickedEvent QuitClick;
@@ -98,7 +97,35 @@ internal static class MapMenuBuilder
         private Vector2 _panelPos;
         private Vector2 _panelSize;
         private float _quitY;
+        private float _topY;
+        private float _rowSpacing;
+        private float _topPad;
+        private float _baseFont;
+        private float _rowWidth;
+        private Transform _divTemplate;
+        private readonly List<GameObject> _myDividers = new List<GameObject>();
+        private readonly List<KeyValuePair<GameObject, bool>> _hiddenDividers = new List<KeyValuePair<GameObject, bool>>();
+        private TMP_Text _quitTmp;
+        private bool _qAuto, _qWrap;
+        private float _qSize;
+        private TextOverflowModes _qOverflow;
+        private TextAlignmentOptions _qAlign;
         private readonly Dictionary<string, int> _deleteCounters = new Dictionary<string, int>();
+
+        private static TMP_Text LabelOf(GameObject go)
+        {
+            var t = go != null ? go.transform.Find("Text (TMP)") : null;
+            return t != null ? t.GetComponent<TMP_Text>() : null;
+        }
+
+        private static void StyleFixed(TMP_Text tmp, float size)
+        {
+            if (tmp == null) return;
+            tmp.enableAutoSizing = false;
+            tmp.enableWordWrapping = false;
+            tmp.overflowMode = TextOverflowModes.Ellipsis;
+            tmp.fontSize = size;
+        }
 
         public void Open(bool deleteMode)
         {
@@ -107,21 +134,45 @@ internal static class MapMenuBuilder
             _deleteCounters.Clear();
             _pages = BuildPageList(Menu);
 
-            float topY = StartGame.anchoredPosition.y;
-            float slot1Y = DeleteSave != null ? DeleteSave.anchoredPosition.y : topY - 60f;
-            float slot2Y = Settings.anchoredPosition.y;
-            float rowSpacing = topY - slot1Y;
-            if (rowSpacing == 0f) rowSpacing = 60f;
-            float pagerY = slot2Y - rowSpacing; // quit's old row
-            float backY = pagerY - rowSpacing; // Back goes one row below the pager
+            _topY = StartGame.anchoredPosition.y;
+            float slot1Y = DeleteSave != null ? DeleteSave.anchoredPosition.y : _topY - 60f;
+            _rowSpacing = _topY - slot1Y;
+            if (_rowSpacing == 0f) _rowSpacing = 60f;
 
-            ((RectTransform)Slots[0].transform).anchoredPosition = new Vector2(0f, topY);
-            ((RectTransform)Slots[1].transform).anchoredPosition = new Vector2(0f, slot1Y);
-            ((RectTransform)Slots[2].transform).anchoredPosition = new Vector2(0f, slot2Y);
-            ((RectTransform)PagerRow.transform).anchoredPosition = new Vector2(0f, pagerY);
-            ((RectTransform)PageButton.transform).anchoredPosition = new Vector2(0f, 0f);
+            // Base font: the vanilla row's own (auto-sized) size, slightly reduced.
+            var vanilla = LabelOf(Settings.gameObject) ?? LabelOf(StartGame.gameObject);
+            float vsize = vanilla != null ? vanilla.fontSize : 36f;
+            if (vanilla != null && vanilla.enableAutoSizing) vsize = Mathf.Min(vsize, vanilla.fontSizeMax);
+            _baseFont = Mathf.Max(8f, vsize * 0.9f);
+            _rowWidth = StartGame.rect.width;
+            if (_rowWidth < 10f) _rowWidth = 300f;
+
             if (Background != null) { _panelPos = Background.anchoredPosition; _panelSize = Background.sizeDelta; }
-            ResizePanel(backY);
+            float rowTop = _topY + (1f - StartGame.pivot.y) * StartGame.rect.height;
+            _topPad = Mathf.Clamp(PanelTopY - rowTop, 10f, 80f);
+
+            // Dividers: remember and hide every vanilla/pager divider, show our own.
+            _hiddenDividers.Clear();
+            var mainT = PauseMenuHelper.MainBit(Menu).transform;
+            _divTemplate = null;
+            foreach (Transform child in mainT)
+            {
+                if (child.name.StartsWith("MapsPickerDivider")) continue;
+                if (!child.name.StartsWith("Line") && !child.name.StartsWith("ModsPagerDivider")) continue;
+                if (_divTemplate == null && child.name.StartsWith("Line")) _divTemplate = child;
+                _hiddenDividers.Add(new KeyValuePair<GameObject, bool>(child.gameObject, child.gameObject.activeSelf));
+            }
+            if (_myDividers.Count == 0 && _divTemplate != null)
+            {
+                for (int i = 0; i < RowsPerPage + 1; i++)
+                {
+                    var d = UnityEngine.Object.Instantiate(_divTemplate.gameObject, mainT);
+                    d.name = "MapsPickerDivider" + i;
+                    d.SetActive(false);
+                    _myDividers.Add(d);
+                }
+            }
+            foreach (var kv in _hiddenDividers) kv.Key.SetActive(false);
 
             StartGame.gameObject.SetActive(false);
             if (DeleteSave != null) DeleteSave.gameObject.SetActive(false);
@@ -132,9 +183,14 @@ internal static class MapMenuBuilder
             if (Quit != null)
             {
                 _quitY = Quit.anchoredPosition.y;
-                Quit.anchoredPosition = new Vector2(Quit.anchoredPosition.x, backY);
                 Quit.gameObject.SetActive(true);
                 PauseMenuHelper.SetButtonLabel(Quit.gameObject, "Back");
+                _quitTmp = LabelOf(Quit.gameObject);
+                if (_quitTmp != null)
+                {
+                    _qAuto = _quitTmp.enableAutoSizing; _qSize = _quitTmp.fontSize; _qWrap = _quitTmp.enableWordWrapping;
+                    _qOverflow = _quitTmp.overflowMode; _qAlign = _quitTmp.alignment;
+                }
                 QuitButton.onClick = new Button.ButtonClickedEvent();
                 QuitButton.onClick.AddListener(Close);
             }
@@ -151,11 +207,12 @@ internal static class MapMenuBuilder
             if (kb != null && kb.escapeKey.wasPressedThisFrame) Close();
         }
 
-        // Five rows now (3 maps, page button, Back), so the panel grows while open.
+        // Panel height follows the Back row, with the same padding at the bottom as at the top.
         private void ResizePanel(float backY)
         {
             if (Background == null) return;
-            float bottomEdge = backY - BottomMargin;
+            float backHalf = Quit != null ? Quit.pivot.y * Quit.rect.height : 0f;
+            float bottomEdge = backY - backHalf - _topPad;
             Background.sizeDelta = new Vector2(Background.sizeDelta.x, PanelTopY - bottomEdge);
             Background.anchoredPosition = new Vector2(Background.anchoredPosition.x, bottomEdge + Background.pivot.y * Background.sizeDelta.y);
         }
@@ -165,7 +222,10 @@ internal static class MapMenuBuilder
             if (!_open) return;
             _open = false;
             foreach (var slot in Slots) slot.SetActive(false);
-            PagerRow.SetActive(false);
+            foreach (var part in PagerParts) part.SetActive(false);
+            foreach (var d in _myDividers) d.SetActive(false);
+            foreach (var kv in _hiddenDividers) if (kv.Key != null) kv.Key.SetActive(kv.Value);
+            _hiddenDividers.Clear();
 
             StartGame.gameObject.SetActive(true);
             if (DeleteSave != null) DeleteSave.gameObject.SetActive(true);
@@ -177,6 +237,11 @@ internal static class MapMenuBuilder
             {
                 Quit.anchoredPosition = new Vector2(Quit.anchoredPosition.x, _quitY);
                 if (QuitLabel != null) PauseMenuHelper.SetButtonLabel(Quit.gameObject, QuitLabel);
+                if (_quitTmp != null)
+                {
+                    _quitTmp.enableAutoSizing = _qAuto; _quitTmp.fontSize = _qSize; _quitTmp.enableWordWrapping = _qWrap;
+                    _quitTmp.overflowMode = _qOverflow; _quitTmp.alignment = _qAlign;
+                }
                 if (QuitClick != null) QuitButton.onClick = QuitClick;
             }
 
@@ -187,12 +252,21 @@ internal static class MapMenuBuilder
             }
         }
 
+        private int TotalPages => Math.Max(1, (int)Math.Ceiling(_pages.Count / (double)RowsPerPage));
+
         public void NextPage()
         {
-            int totalPages = Math.Max(1, (int)Math.Ceiling(_pages.Count / (double)RowsPerPage));
-            _pageIndex = (_pageIndex + 1) % totalPages;
+            _pageIndex = (_pageIndex + 1) % TotalPages;
             RefreshPage();
         }
+
+        public void PrevPage()
+        {
+            _pageIndex = (_pageIndex + TotalPages - 1) % TotalPages;
+            RefreshPage();
+        }
+
+        private float RowY(int index) => _topY - index * _rowSpacing;
 
         private void RefreshPage()
         {
@@ -205,6 +279,7 @@ internal static class MapMenuBuilder
                 {
                     var page = _pages[startIdx + i];
                     slot.SetActive(true);
+                    ((RectTransform)slot.transform).anchoredPosition = new Vector2(0f, RowY(i));
                     PauseMenuHelper.SetButtonLabel(slot, RowLabel(page));
                     var btn = slot.GetComponent<Button>();
                     btn.onClick = new Button.ButtonClickedEvent();
@@ -216,12 +291,78 @@ internal static class MapMenuBuilder
                 }
             }
 
-            int totalPages = Math.Max(1, (int)Math.Ceiling(_pages.Count / (double)RowsPerPage));
+            int totalPages = TotalPages;
             bool multi = totalPages > 1;
-            var pagerRt = (RectTransform)PagerRow.transform;
-            pagerRt.sizeDelta = new Vector2(Mathf.Max(100f, pagerRt.sizeDelta.x), 60f);
-            PagerRow.SetActive(multi);
-            if (multi) PauseMenuHelper.SetButtonLabel(PageButton, "Page " + (_pageIndex + 1) + "/" + totalPages + "  >");
+            int pagerIdx = count;
+            int backIdx = count + (multi ? 1 : 0);
+
+            if (multi)
+            {
+                float y = RowY(pagerIdx);
+                float h = StartGame.sizeDelta.y;
+                float[] xs = { -_rowWidth * 0.375f, 0f, _rowWidth * 0.375f };
+                float[] ws = { _rowWidth * 0.25f, _rowWidth * 0.5f, _rowWidth * 0.25f };
+                string[] texts = { "<", (_pageIndex + 1) + " / " + totalPages, ">" };
+                for (int i = 0; i < 3; i++)
+                {
+                    var part = PagerParts[i];
+                    var rt = (RectTransform)part.transform;
+                    rt.anchorMin = new Vector2(0.5f, StartGame.anchorMin.y);
+                    rt.anchorMax = new Vector2(0.5f, StartGame.anchorMax.y);
+                    rt.pivot = new Vector2(0.5f, StartGame.pivot.y);
+                    rt.sizeDelta = new Vector2(ws[i], h);
+                    rt.anchoredPosition = new Vector2(xs[i], y);
+                    part.SetActive(true);
+                    PauseMenuHelper.SetButtonLabel(part, texts[i]);
+                    var tmp = LabelOf(part);
+                    if (tmp != null) tmp.alignment = TextAlignmentOptions.Center;
+                }
+            }
+            else
+            {
+                foreach (var part in PagerParts) part.SetActive(false);
+            }
+
+            float backY = RowY(backIdx);
+            if (Quit != null) Quit.anchoredPosition = new Vector2(Quit.anchoredPosition.x, backY);
+            ResizePanel(backY);
+
+            // Dividers between every pair of consecutive visible rows (incl. above Back).
+            for (int j = 0; j < _myDividers.Count; j++)
+            {
+                var d = _myDividers[j];
+                bool show = j < backIdx;
+                d.SetActive(show);
+                if (!show) continue;
+                var drt = (RectTransform)d.transform;
+                drt.anchoredPosition = new Vector2(drt.anchoredPosition.x, _topY - (j + 0.5f) * _rowSpacing);
+            }
+
+            ApplyFit();
+        }
+
+        // One font size for every row on the page: the base size, or smaller for
+        // all of them when the longest label would not fit; the rest ellipsises.
+        private void ApplyFit()
+        {
+            var tmps = new List<TMP_Text>();
+            foreach (var slot in Slots) if (slot.activeSelf) { var t = LabelOf(slot); if (t != null) tmps.Add(t); }
+
+            float size = _baseFont;
+            float floor = _baseFont * 0.6f;
+            foreach (var t in tmps)
+            {
+                StyleFixed(t, _baseFont);
+                var rect = t.rectTransform.rect;
+                float avail = rect.width - t.margin.x - t.margin.z;
+                if (avail < 10f) avail = _rowWidth * 0.85f;
+                float need = t.GetPreferredValues(t.text, 100000f, 0f).x;
+                if (need > avail && need > 0f) size = Mathf.Min(size, _baseFont * avail / need);
+            }
+            size = Mathf.Max(floor, size);
+            foreach (var t in tmps) StyleFixed(t, size);
+            foreach (var part in PagerParts) if (part.activeSelf) StyleFixed(LabelOf(part), size);
+            if (_quitTmp != null) { StyleFixed(_quitTmp, size); _quitTmp.alignment = _qAlign; }
         }
 
         private string RowLabel(MapPage page) => _deleteMode ? "Delete " + page.Label : page.Label;
@@ -270,6 +411,7 @@ internal static class MapMenuBuilder
                 {
                     PauseMenuHelper.SetButtonLabel(slot, messages[counter].GetLocalizedString());
                 }
+                ApplyFit();
             }
             else
             {
@@ -277,6 +419,7 @@ internal static class MapMenuBuilder
                 if (isHard) Menu.DeleteSavePressedHard();
                 else Menu.DeleteSavePressed();
                 PauseMenuHelper.SetButtonLabel(slot, RealDeleteButtonText(Menu, isHard));
+                ApplyFit();
             }
         }
     }
@@ -298,19 +441,19 @@ internal static class MapMenuBuilder
             state.Slots[i] = slotGo;
         }
 
-        var pagerRow = new GameObject("MapsPickerPager", typeof(RectTransform));
-        pagerRow.transform.SetParent(PauseMenuHelper.MainBit(menu).transform, false);
-        pagerRow.SetActive(false);
-        state.PagerRow = pagerRow;
-
-        var pageGo = UnityEngine.Object.Instantiate(startGame.gameObject, pagerRow.transform);
-        pageGo.name = "MapsPickerPageButton";
-        ((RectTransform)pageGo.transform).anchoredPosition = new Vector2(0f, 0f);
-        PauseMenuHelper.SetButtonLabel(pageGo, "Page 1/1  >");
-        var pageBtn = pageGo.GetComponent<Button>();
-        pageBtn.onClick = new Button.ButtonClickedEvent();
-        pageBtn.onClick.AddListener(state.NextPage);
-        state.PageButton = pageGo;
+        state.PagerParts = new GameObject[3];
+        string[] partNames = { "Prev", "Mid", "Next" };
+        for (int i = 0; i < 3; i++)
+        {
+            var part = UnityEngine.Object.Instantiate(startGame.gameObject, PauseMenuHelper.MainBit(menu).transform);
+            part.name = "MapsPickerPage" + partNames[i];
+            part.SetActive(false);
+            var pb = part.GetComponent<Button>();
+            pb.onClick = new Button.ButtonClickedEvent();
+            if (i == 0) pb.onClick.AddListener(state.PrevPage);
+            else pb.onClick.AddListener(state.NextPage);
+            state.PagerParts[i] = part;
+        }
 
         // Remember the quit row so picker mode can hand it back untouched.
         var quit = PauseMenuHelper.MainBit(menu).transform.Find("QuitToDesktop") as RectTransform;
