@@ -87,17 +87,11 @@ internal static class MapMenuBuilder
         public Button QuitButton;
         public Button.ButtonClickedEvent QuitClick;
         public string QuitLabel;
-        public RectTransform Background;
-        public float PanelTopY;
-        public float BottomMargin;
 
         private bool _open;
         private bool _deleteMode;
         private int _pageIndex;
         private List<MapPage> _pages;
-        private Vector2 _panelPos;
-        private Vector2 _panelSize;
-        private float _quitY;
         private readonly Dictionary<string, int> _deleteCounters = new Dictionary<string, int>();
 
         public void Open(bool deleteMode)
@@ -107,21 +101,43 @@ internal static class MapMenuBuilder
             _deleteCounters.Clear();
             _pages = BuildPageList(Menu);
 
+            // The panel is never resized: 3 maps + the page row + Back all sit
+            // inside the rows the main menu already has. Maps take the first
+            // three rows, the page row the next one, and Back stays on Quit's
+            // own row. If Quit sits less than four row-steps below the top
+            // (no mods row in the menu), the step shrinks so all five rows
+            // still fit between the first row and Quit.
             float topY = StartGame.anchoredPosition.y;
             float slot1Y = DeleteSave != null ? DeleteSave.anchoredPosition.y : topY - 60f;
-            float slot2Y = Settings.anchoredPosition.y;
             float rowSpacing = topY - slot1Y;
             if (rowSpacing == 0f) rowSpacing = 60f;
-            float pagerY = slot2Y - rowSpacing; // quit's old row
-            float backY = pagerY - rowSpacing; // Back goes one row below the pager
+            // Vanilla step on all five rows; Back sits one step below Quit's old spot.
+            // Only if Back (plus half a step) would leave the panel does the step shrink.
+            float panelBottom = float.NegativeInfinity;
+            try
+            {
+                var panelRt = PauseMenuHelper.MainBit(Menu).GetComponent<RectTransform>();
+                var rowParent = (Quit != null ? Quit.parent : StartGame.parent) as RectTransform;
+                if (panelRt != null && rowParent == panelRt) panelBottom = panelRt.rect.yMin;
+                else if (panelRt != null && rowParent != null)
+                    panelBottom = rowParent.InverseTransformPoint(panelRt.TransformPoint(new Vector3(0f, panelRt.rect.yMin, 0f))).y;
+            }
+            catch (Exception) { }
+            if (rowSpacing < 0f) rowSpacing = -rowSpacing;
+            float backY = topY - 4f * rowSpacing;
+            if (!float.IsNegativeInfinity(panelBottom) && backY - rowSpacing * 0.5f < panelBottom)
+            {
+                float fit = (topY - (panelBottom + rowSpacing * 0.5f)) / 4f;
+                if (fit > 0f && fit < rowSpacing) { rowSpacing = fit; backY = topY - 4f * rowSpacing; }
+            }
+            _panelBottom = panelBottom;
+            float pagerY = topY - 3f * rowSpacing;
 
             ((RectTransform)Slots[0].transform).anchoredPosition = new Vector2(0f, topY);
-            ((RectTransform)Slots[1].transform).anchoredPosition = new Vector2(0f, slot1Y);
-            ((RectTransform)Slots[2].transform).anchoredPosition = new Vector2(0f, slot2Y);
+            ((RectTransform)Slots[1].transform).anchoredPosition = new Vector2(0f, topY - rowSpacing);
+            ((RectTransform)Slots[2].transform).anchoredPosition = new Vector2(0f, topY - 2f * rowSpacing);
             ((RectTransform)PagerRow.transform).anchoredPosition = new Vector2(0f, pagerY);
             ((RectTransform)PageButton.transform).anchoredPosition = new Vector2(0f, 0f);
-            if (Background != null) { _panelPos = Background.anchoredPosition; _panelSize = Background.sizeDelta; }
-            ResizePanel(backY);
 
             StartGame.gameObject.SetActive(false);
             if (DeleteSave != null) DeleteSave.gameObject.SetActive(false);
@@ -131,9 +147,9 @@ internal static class MapMenuBuilder
 
             if (Quit != null)
             {
-                _quitY = Quit.anchoredPosition.y;
-                Quit.anchoredPosition = new Vector2(Quit.anchoredPosition.x, backY);
                 Quit.gameObject.SetActive(true);
+                if (!_quitMoved) { _quitOrigPos = Quit.anchoredPosition; _quitMoved = true; }
+                Quit.anchoredPosition = new Vector2(_quitOrigPos.x, backY);
                 PauseMenuHelper.SetButtonLabel(Quit.gameObject, "Back");
                 QuitButton.onClick = new Button.ButtonClickedEvent();
                 QuitButton.onClick.AddListener(Close);
@@ -141,7 +157,113 @@ internal static class MapMenuBuilder
 
             RefreshPage();
             _open = true;
+
+            _rowYs = new[] { topY, topY - rowSpacing, topY - 2f * rowSpacing, pagerY, backY };
+            ApplyPickerDividers();
+            LogLayout(topY, rowSpacing, backY);
         }
+
+        private float[] _rowYs;
+        private float _panelBottom;
+        private bool _quitMoved;
+        private Vector2 _quitOrigPos;
+        private readonly List<GameObject> _hiddenDividers = new List<GameObject>();
+        private readonly List<GameObject> _pickerDividers = new List<GameObject>();
+        private string _vanillaDividerLog = "";
+
+        private static bool IsDivider(Transform t) => t.name.StartsWith("Line") || t.name.StartsWith("ModsPagerDivider");
+
+        private void ApplyPickerDividers()
+        {
+            try
+            {
+                RestorePickerDividers(); // never hide twice / leave clones behind
+                var main = PauseMenuHelper.MainBit(Menu).transform;
+                // stale clones from a previous (rebuilt) menu instance
+                foreach (var stale in main.Cast<Transform>().Where(c => c.name.StartsWith("MapsPickerDivider")).ToList())
+                    UnityEngine.Object.Destroy(stale.gameObject);
+
+                float hi = _rowYs[0] + 0.5f, lo = _rowYs[4] - 0.5f;
+                Transform template = null;
+                var log = new System.Text.StringBuilder();
+                foreach (Transform child in main)
+                {
+                    if (!IsDivider(child) || child.name.StartsWith("MapsPickerDivider")) continue;
+                    var rt = child as RectTransform;
+                    if (rt == null || !child.gameObject.activeSelf) continue;
+                    if (log.Length > 0) log.Append(',');
+                    log.Append(child.name).Append(':').Append(rt.anchoredPosition.y.ToString("F1"));
+                    if (template == null || (!template.name.StartsWith("Line") && child.name.StartsWith("Line"))) template = child;
+                }
+                _vanillaDividerLog = log.ToString();
+                if (template == null) return;
+
+                var templateGo = template.gameObject;
+                var parent = template.parent;
+                var templateRt = (RectTransform)template;
+                for (int i = 0; i < 4; i++)
+                {
+                    var d = UnityEngine.Object.Instantiate(templateGo, parent);
+                    d.name = "MapsPickerDivider" + i;
+                    d.SetActive(true);
+                    var drt = (RectTransform)d.transform;
+                    drt.anchoredPosition = new Vector2(templateRt.anchoredPosition.x, (_rowYs[i] + _rowYs[i + 1]) * 0.5f);
+                    _pickerDividers.Add(d);
+                }
+
+                foreach (Transform child in parent.Cast<Transform>().ToList())
+                {
+                    if (!IsDivider(child) || child.name.StartsWith("MapsPickerDivider")) continue;
+                    var rt = child as RectTransform;
+                    if (rt == null || !child.gameObject.activeSelf) continue;
+                    float y = rt.anchoredPosition.y;
+                    if (y <= hi && y >= lo)
+                    {
+                        child.gameObject.SetActive(false);
+                        _hiddenDividers.Add(child.gameObject);
+                    }
+                }
+            }
+            catch (Exception e)
+            {
+                Debug.LogWarning("[Navigator] picker dividers: " + e.Message);
+            }
+        }
+
+        private void RestorePickerDividers()
+        {
+            try
+            {
+                foreach (var d in _pickerDividers) if (d != null) UnityEngine.Object.Destroy(d);
+                _pickerDividers.Clear();
+                foreach (var d in _hiddenDividers) if (d != null) d.SetActive(true);
+                _hiddenDividers.Clear();
+            }
+            catch (Exception e)
+            {
+                Debug.LogWarning("[Navigator] picker dividers: " + e.Message);
+            }
+        }
+
+        private void LogLayout(float topY, float step, float quitY)
+        {
+            try
+            {
+                var rt = PauseMenuHelper.MainBit(Menu).GetComponent<RectTransform>();
+                var pk = string.Join(",", _pickerDividers.Where(d => d != null).Select(d => d.name + ":" + ((RectTransform)d.transform).anchoredPosition.y.ToString("F1")).ToArray());
+                Debug.Log("[Navigator] picker layout: topY=" + topY.ToString("F1") + " step=" + step.ToString("F1") + " quitY=" + quitY.ToString("F1")
+                    + " rows=[" + string.Join(",", _rowYs.Select(y => y.ToString("F1")).ToArray()) + "]"
+                    + " dividers(vanilla)=[" + _vanillaDividerLog + "] dividers(picker)=[" + pk + "]"
+                    + " panelBottom=" + _panelBottom.ToString("F1") + " panel=" + rt.sizeDelta + "/" + rt.anchoredPosition);
+            }
+            catch (Exception e) { Debug.LogWarning("[Navigator] picker dividers: log " + e.Message); }
+        }
+
+        // Safety nets: whenever the panel goes away the lines come back; if it
+        // returns while the picker is still open, the picker lines return too.
+        private void OnDisable() { RestorePickerDividers(); }
+        private void OnDestroy() { RestorePickerDividers(); }
+        private void OnEnable() { if (_open && _rowYs != null) ApplyPickerDividers(); }
 
         // Escape backs out of the picker, same as the Back row.
         private void Update()
@@ -151,39 +273,37 @@ internal static class MapMenuBuilder
             if (kb != null && kb.escapeKey.wasPressedThisFrame) Close();
         }
 
-        // Five rows now (3 maps, page button, Back), so the panel grows while open.
-        private void ResizePanel(float backY)
-        {
-            if (Background == null) return;
-            float bottomEdge = backY - BottomMargin;
-            Background.sizeDelta = new Vector2(Background.sizeDelta.x, PanelTopY - bottomEdge);
-            Background.anchoredPosition = new Vector2(Background.anchoredPosition.x, bottomEdge + Background.pivot.y * Background.sizeDelta.y);
-        }
-
         public void Close()
         {
             if (!_open) return;
             _open = false;
+            RestorePickerDividers();
             foreach (var slot in Slots) slot.SetActive(false);
             PagerRow.SetActive(false);
 
             StartGame.gameObject.SetActive(true);
             if (DeleteSave != null) DeleteSave.gameObject.SetActive(true);
             Settings.gameObject.SetActive(true);
-            var modsPager = PauseMenuHelper.MainBit(Menu).transform.Find("ModsPager");
-            if (modsPager != null) modsPager.gameObject.SetActive(true);
-
             if (Quit != null)
             {
-                Quit.anchoredPosition = new Vector2(Quit.anchoredPosition.x, _quitY);
+                if (_quitMoved) { Quit.anchoredPosition = _quitOrigPos; _quitMoved = false; }
                 if (QuitLabel != null) PauseMenuHelper.SetButtonLabel(Quit.gameObject, QuitLabel);
                 if (QuitClick != null) QuitButton.onClick = QuitClick;
             }
 
-            if (Background != null)
+            // Re-enabling the pager last lets it re-apply its own layout
+            // (page row above Quit); with no pager, the saved spot stands.
+            var modsPager = PauseMenuHelper.MainBit(Menu).transform.Find("ModsPager");
+            if (modsPager != null)
             {
-                Background.sizeDelta = _panelSize;
-                Background.anchoredPosition = _panelPos;
+                modsPager.gameObject.SetActive(true);
+                var pageBtn = modsPager.Find("ModsPagerPageButton") as RectTransform;
+                if (Quit != null && pageBtn != null && pageBtn.gameObject.activeSelf)
+                {
+                    float step = Mathf.Abs(_rowYs != null && _rowYs.Length > 1 ? _rowYs[0] - _rowYs[1] : 0f);
+                    if (step > 0f && Quit.anchoredPosition.y > pageBtn.anchoredPosition.y - step * 0.5f)
+                        Quit.anchoredPosition = new Vector2(Quit.anchoredPosition.x, pageBtn.anchoredPosition.y - step);
+                }
             }
         }
 
@@ -321,16 +441,6 @@ internal static class MapMenuBuilder
             state.QuitClick = state.QuitButton != null ? state.QuitButton.onClick : null;
             var labelT = quit.Find("Text (TMP)");
             state.QuitLabel = labelT != null ? labelT.GetComponent<TMPro.TMP_Text>()?.text : null;
-
-            var background = PauseMenuHelper.MainBit(menu).GetComponent<RectTransform>();
-            if (background != null)
-            {
-                var fitter = background.GetComponent<ContentSizeFitter>();
-                if (fitter != null) fitter.verticalFit = ContentSizeFitter.FitMode.Unconstrained;
-                state.Background = background;
-                state.PanelTopY = background.anchoredPosition.y + (1f - background.pivot.y) * background.sizeDelta.y;
-                state.BottomMargin = quit.anchoredPosition.y - (background.anchoredPosition.y - background.pivot.y * background.sizeDelta.y) + 20f;
-            }
         }
 
         return state;
