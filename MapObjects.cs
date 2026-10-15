@@ -28,6 +28,7 @@ internal static class MapObjects
         ["clone"] = SpawnClone,
         ["erase"] = LevelOnly(Erase),
         ["hide"] = LevelOnly(Hide),
+        ["hideCheckpoint"] = LevelOnly(HideCheckpoint),
         ["modify"] = LevelOnly(Modify),
         ["move"] = LevelOnly(Move),
         ["transform"] = LevelOnly(TransformLevel),
@@ -220,9 +221,11 @@ internal static class MapObjects
     private static void PaintTile(MapWorld w, string tilemapName, JObject obj)
     {
         var tilemap = w.Tilemap(tilemapName);
+        if (w.Overlay && tilemapName == "OvergrowthSpikes")
+            tilemap = w.OwnTilemap(tilemapName + " (map)", tilemapName, independentGrid: true);
         // A level tilemap that's switched off in this map's state (the overgrowth's
         // thorn vines at the start of the game): paint the map's own copy, which is on.
-        if (w.Overlay && !tilemap.gameObject.activeInHierarchy) tilemap = w.OwnTilemap(tilemapName + " (map)", tilemapName);
+        else if (w.Overlay && !tilemap.gameObject.activeInHierarchy) tilemap = w.OwnTilemap(tilemapName + " (map)", tilemapName);
         tilemap = Grouped(w, tilemap, tilemapName, obj);
         var tile = TileFor(tilemapName, obj) ?? throw new Exception("no tile '" + (obj["tileName"] ?? obj["tileIndex"]) + "' for '" + tilemapName + "'");
         w.Paint(tilemap, w.CellOf(tilemap, obj), tile, MapWorld.MatrixOf(obj));
@@ -233,7 +236,8 @@ internal static class MapObjects
     {
         var g = MapGroups.Of(obj);
         if (g == null) return tilemap;
-        var own = w.OwnTilemap(tilemap.name + " #" + g, tilemapName == TrueSpikes ? "Spikes" : tilemapName);
+        var own = w.OwnTilemap(tilemap.name + " #" + g, tilemapName == TrueSpikes ? "Spikes" : tilemapName,
+            independentGrid: w.Overlay && tilemapName == "OvergrowthSpikes");
         if (tilemapName == TrueSpikes || tilemap.name.EndsWith(" (map)"))
         {
             own.color = tilemap.color;
@@ -525,6 +529,7 @@ internal static class MapObjects
         if (obj["levelUpgrade"] is JObject levelUpgrade) MapUpgrades.OverrideBox(clone, levelUpgrade);
         try { MapCloneConfig.Apply(clone, obj); }
         catch (Exception e) { Debug.LogWarning("[RechargeMaps] settings for '" + path + "' failed: " + e.Message); }
+        MapCloneConfig.HideZoneArt(clone);
         if (obj["absolute"]?.Value<bool>() == true && obj["scale"] != null)
             Debug.Log("[RechargeMaps] scaled clone '" + path + "': editor x,y " + obj["x"] + "," + obj["y"] + " scale " + obj["scale"].ToString(Newtonsoft.Json.Formatting.None) + "; placed at " + MapWorld.LevelOf(clone.transform.position) + " (level space), world scale " + (Vector2)clone.transform.lossyScale);
     }
@@ -679,6 +684,30 @@ internal static class MapObjects
         w.OnUnload(() => { if (sr != null) sr.enabled = shown; });
     }
 
+    private static void HideCheckpoint(MapWorld w, JObject obj)
+    {
+        var best = LevelCheckpointNear(obj);
+        w.SetActive(best.gameObject, false);
+        w.KeepHidden(best.gameObject);
+    }
+
+    private static checkpointScript LevelCheckpointNear(JObject obj)
+    {
+        var wanted = new Vector2(obj["x"]?.Value<float>() ?? 0f, obj["y"]?.Value<float>() ?? 0f);
+        checkpointScript best = null;
+        var distance = 8f;
+        foreach (var checkpoint in UnityEngine.Object.FindObjectsByType<checkpointScript>(FindObjectsInactive.Include, FindObjectsSortMode.None))
+        {
+            if (checkpoint == null || !checkpoint.gameObject.scene.IsValid() || MapWorld.IsMapObject(checkpoint.transform)) continue;
+            var d = Vector2.Distance(MapWorld.LevelOf(checkpoint.transform.position), wanted);
+            if (d >= distance) continue;
+            best = checkpoint;
+            distance = d;
+        }
+        if (best == null) throw new Exception("no base-game checkpoint found near " + wanted);
+        return best;
+    }
+
     // One of the level's own things, moved in the editor: the real object goes along by the same amount.
     private static void Move(MapWorld w, JObject obj)
     {
@@ -724,6 +753,13 @@ internal static class MapObjects
 
     private static void Modify(MapWorld w, JObject obj)
     {
+        // A level checkpoint filed under a course: it only counts while that course's run is going.
+        if (obj["checkpoint"]?.Value<bool>() == true)
+        {
+            var course = obj["course"]?.Value<string>();
+            if (!string.IsNullOrEmpty(course)) w.CheckpointLinks.Add((LevelCheckpointNear(obj), course));
+            return;
+        }
         var target = LevelObject(w, obj).gameObject;
         if (!(obj["upgrade"] is JObject upgrade)) return;
         var undo = MapUpgrades.OverrideBox(target, upgrade);
@@ -736,6 +772,7 @@ internal static class MapObjects
     {
         var spawned = RealAssetPalette.Spawn<T>(w.Point(obj), MapWorld.Rot(obj), w.Root) ?? throw new Exception("no " + typeof(T).Name + " seen in the level yet");
         foreach (var col in spawned.GetComponents<Collider2D>()) col.isTrigger = true;
+        MapCloneConfig.HideZoneArt(spawned.gameObject);
         return spawned;
     }
 

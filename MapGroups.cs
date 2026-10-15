@@ -71,6 +71,7 @@ internal class MapGroupTrigger : MonoBehaviour
             case "hide": SetGroup(_ => false); break;
             case "toggle": SetGroup(go => !go.activeSelf); break;
             case "move": if (!_moved) MoveGroup(Offset); break;
+            case "swapBlocks": if (mv != null) mv.swapBlocks(); break;
             case "teleport": Teleport(mv); break;
             case "respawn": if (mv != null) mv.respawnPoint = Target + new Vector2(0f, 12f); break;
             case "message": MapMessage.Show(Text, Seconds); break;

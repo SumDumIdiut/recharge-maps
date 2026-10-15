@@ -77,7 +77,15 @@ internal class MapManager : MonoBehaviour
     // Back to Base Game / B-side from a map: the map is saved and released as the doors close.
     public static void LeaveTo(pauseMenuScript menu, bool hard)
     {
-        DoorTransition.Run(menu, hard, () => { MapSaves.SaveForSceneChange(); MapSaves.LeaveMap(); });
+        Action prepare = () => { MapSaves.SaveForSceneChange(); MapSaves.LeaveMap(); };
+        if (SceneManager.GetActiveScene().name == "MainMenu")
+        {
+            // The title screen's own transition performs the normal Base Game/B-side load.
+            prepare();
+            if (hard) menu.changeSceneHard(); else menu.changeScene();
+            return;
+        }
+        DoorTransition.Run(menu, hard, prepare);
     }
 
     // The gameplay Player moves itself to its save's respawn point as it

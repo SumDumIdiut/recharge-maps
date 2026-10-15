@@ -36,7 +36,12 @@ public static class MapSaves
     // carries no pending map either - so "no pending map" alone can't be read as
     // "left the map". Acting on it dropped the map mid-play, and the game carried
     // on with Base Game progress and no save of its own.
-    public static void LeaveMap() { _leavingForBaseGame = true; ReleaseSave(); }
+    public static void LeaveMap()
+    {
+        _leavingForBaseGame = true;
+        StopGameSaving();
+        ReleaseSave();
+    }
     private static bool _realSaveSeen;
     private static bool _savedForSceneChange;
     private static bool _leavingForBaseGame;
@@ -90,6 +95,7 @@ public static class MapSaves
         Debug.Log("[RechargeMaps] scene '" + scene.name + "' loaded; the game read " + (SaveSwap.IsSwapped
             ? "the swapped-in copy of " + (ActiveMapId != null ? FolderFor(ActiveMapId) : _pendingMapId != null ? FolderFor(_pendingMapId) : "a map save")
             : "the REAL Base Game save") + " (" + SaveSwap.Describe(SaveSwap.Game) + ")");
+        LogCourseLoadShape("scene '" + scene.name + "'", SaveSwap.Game);
         // The title scene reloads itself once at startup: the swap waits for the gameplay scene.
         if (_pendingMapId != null && scene.name == "MainMenu")
         {
@@ -144,6 +150,71 @@ public static class MapSaves
         if (ActiveMapId == null || _savedForSceneChange) return;
         _savedForSceneChange = true;
         SaveAll(FolderFor(ActiveMapId));
+    }
+
+    public static void SaveCourseRun(courseScript course)
+    {
+        if (ActiveMapId == null || course == null || SaveSwap.IsSwapped) return;
+        try { SaveObject(course, FolderFor(ActiveMapId)); }
+        catch (Exception e) { Debug.LogWarning("[RechargeMaps] saving finished course " + course.courseNumber + " failed: " + e.Message); }
+    }
+
+
+    // The game saves a course's upgrade boxes by child position (courseScript.save lists every
+    // child of its localUpgrades; courseScript.load reads them back with GetChild(i)). The map's
+    // own boxes are linked in under a level course as extra children, so a save that listed them
+    // asked the next load - which runs before the map is built - for children that don't exist yet
+    // ("Course N Box Loading failed! Transform child out of bounds"). Those boxes keep their
+    // amounts in navigator-boxes.json, so they are stepped out of the way for the game's save
+    // and put back exactly as they were.
+    private static void SaveObject(SaveableObject obj, string folder)
+    {
+        var course = obj as courseScript;
+        var local = course != null ? course.localUpgradesScript : null;
+        if (local == null) { obj.save(folder); return; }
+        var held = new System.Collections.Generic.List<(Transform t, int index, Vector3 pos, Quaternion rot, Vector3 scale)>();
+        foreach (Transform child in local.transform)
+            if (child.GetComponent<MapUpgradeBox>() != null)
+                held.Add((child, child.GetSiblingIndex(), child.localPosition, child.localRotation, child.localScale));
+        if (held.Count == 0) { obj.save(folder); return; }
+        foreach (var h in held) h.t.SetParent(null, false);
+        try { obj.save(folder); }
+        finally
+        {
+            foreach (var h in held.OrderBy(x => x.index))
+            {
+                if (h.t == null) continue;
+                h.t.SetParent(local.transform, false);
+                h.t.SetSiblingIndex(Math.Min(h.index, local.transform.childCount - 1));
+                h.t.localPosition = h.pos;
+                h.t.localRotation = h.rot;
+                h.t.localScale = h.scale;
+            }
+        }
+    }
+
+    // What the game's own load is about to meet: per course, how many boxes the save lists against
+    // how many children its localUpgrades has right now. A mismatch is exactly what makes the
+    // game's load log "Box Loading failed" and leave the later boxes at their defaults.
+    public static void LogCourseLoadShape(string where, string folder)
+    {
+        try
+        {
+            var dir = SaveSwap.Full(folder);
+            foreach (var c in UnityEngine.Object.FindObjectsByType<courseScript>(FindObjectsInactive.Include, FindObjectsSortMode.None))
+            {
+                if (c == null || !c.gameObject.scene.IsValid() || c.localUpgradesScript == null) continue;
+                var file = dir + "/course" + c.courseNumber + "data.txt";
+                if (!File.Exists(file)) continue;
+                int listed = -1;
+                try { listed = (JObject.Parse(File.ReadAllText(file))["_boxCosts"] as JArray)?.Count ?? -1; } catch { }
+                int have = c.localUpgradesScript.transform.childCount;
+                if (listed != have)
+                    Debug.LogWarning("[RechargeMaps] " + where + ": course " + c.courseNumber + " (" + RealAssetPalette.GetPath(c.transform) + ") - the save lists " + listed +
+                                     " upgrade boxes, the scene has " + have + "; the game loads boxes by position, so the surplus ones fail to load");
+            }
+        }
+        catch (Exception e) { Debug.LogWarning("[RechargeMaps] course load check failed: " + e.Message); }
     }
 
     // The scene is going: no game autosave of a player who has been switched off.
@@ -316,7 +387,7 @@ public static class MapSaves
         {
             // The title scene can stay loaded beside the world with its own copies.
             if (obj.gameObject.scene.name == "MainMenu") continue;
-            try { obj.save(folder); saved.Add(obj.GetType().Name); }
+            try { SaveObject(obj, folder); saved.Add(obj.GetType().Name); }
             catch (Exception e) { Debug.LogWarning("[RechargeMaps] saving " + obj.GetType().Name + " failed: " + e.Message); }
         }
         // Movement writes playerdata.txt, and HasSave() looks for exactly that file: without it

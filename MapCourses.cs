@@ -42,6 +42,7 @@ internal static class MapCourses
             if (box != null) box.LinkCourse(course);
             else if (levelBox != null) LinkLevelBox(levelBox, course);
             else go.transform.SetParent(course.transform, true);
+            MapCourseCheckpoint.Attach(go, course, id);
         }
 
         // A course's clones only run once it has boxes to buy them with.
@@ -53,6 +54,19 @@ internal static class MapCourses
         }
 
         LinkLevelCourses(w);
+        // The level's own checkpoints the editor filed under a course.
+        foreach (var (checkpoint, id) in w.CheckpointLinks)
+        {
+            if (checkpoint == null) continue;
+            var course = id.StartsWith("level:") && int.TryParse(id.Substring(6), out var n) ? LevelCourse(n) : byId.TryGetValue(id, out var own) ? own : null;
+            if (course == null) { Debug.LogWarning("[Navigator] course checkpoint " + checkpoint.name + ": no course '" + id + "' to link to"); continue; }
+            var gate = MapCourseCheckpoint.Attach(checkpoint.gameObject, course, id);
+            w.OnUnload(() => { if (gate != null) gate.Release(); });
+        }
+        MapUpgradeBox.RestoreLinkedCourseEffects();
+        foreach (var pair in byId)
+            if (pair.Value != null)
+                MapCloneVisibility.LogCourse(pair.Value.courseNumber + (string.IsNullOrEmpty(pair.Key) ? "" : " (" + pair.Key + ")"), pair.Value.GetComponentInChildren<clonesScript>(true));
         WireTeleporters(w);
         // Every finish line logs the run and the best time it leaves, the level's courses' too.
         foreach (var end in UnityEngine.Object.FindObjectsByType<endGate>(FindObjectsInactive.Include, FindObjectsSortMode.None))
@@ -125,6 +139,7 @@ internal static class MapCourses
         var bits = go.transform.Find("DisableBits");
         if (bits != null) bits.gameObject.SetActive(true);
         go.SetActive(true);
+        MapCloneConfig.HideZoneArt(go);
         try { course.load(MapSaves.ActiveFolder); }
         catch (Exception e) { Debug.Log("[RechargeMaps] no saved run for the map's course yet: " + e.Message); ResetRun(course); }
 
@@ -155,6 +170,12 @@ internal static class MapCourses
             PlaceResets(course, resets, spec.Resets, r => { var p = anchor + (Vector3)w.LevelPoint(r.X, r.Y); p.z = start.transform.position.z; return p; }, (end != null ? (Component)end : start).gameObject.layer);
         }
         EnsureResetPoint(course, start);
+        if (start != null || end != null)
+        {
+            var first = start != null ? start.transform.position : end.transform.position;
+            var last = end != null ? end.transform.position : first;
+            PlaceCloneLod(w, course, first, last);
+        }
         Debug.Log("[RechargeMaps] copied level course '" + path + "' as course " + course.courseNumber + " (" + relinked + " links to its things copied apart)");
         return course;
     }
@@ -300,6 +321,66 @@ internal static class MapCourses
         SetReward(course, end, spec.Reward, true);
         if (spec.Resets != null) PlaceResets(course, new List<endGate>(), spec.Resets, r => MapWorld.Live(w.LevelPoint(r.X, r.Y)), end.gameObject.layer);
         EnsureResetPoint(course, start);
+        PlaceCloneLod(w, course, start.transform.position, end.transform.position);
+    }
+
+    private static void PlaceCloneLod(MapWorld w, courseScript course, Vector3 start, Vector3 end)
+    {
+        var clones = course.GetComponentInChildren<clonesScript>(true);
+        var lod = clones != null ? clones.GetComponentInChildren<clonesLoD>(true) : null;
+        var box = lod != null ? lod.GetComponent<BoxCollider2D>() : null;
+        if (clones == null || lod == null || box == null)
+        {
+            Debug.LogWarning("[RechargeMaps] course " + course.courseNumber + " has no clone visibility trigger");
+            return;
+        }
+
+        var first = course.transform.InverseTransformPoint(start);
+        var last = course.transform.InverseTransformPoint(end);
+        var minX = Mathf.Min(first.x, last.x);
+        var maxX = Mathf.Max(first.x, last.x);
+        var minY = Mathf.Min(first.y, last.y);
+        var maxY = Mathf.Max(first.y, last.y);
+        foreach (var point in clones.clonePath ?? Array.Empty<Vector2>())
+        {
+            if (float.IsNaN(point.x) || float.IsInfinity(point.x) || float.IsNaN(point.y) || float.IsInfinity(point.y)) continue;
+            minX = Mathf.Min(minX, point.x);
+            maxX = Mathf.Max(maxX, point.x);
+            minY = Mathf.Min(minY, point.y);
+            maxY = Mathf.Max(maxY, point.y);
+        }
+
+        const float Padding = 128f;
+        const float MinimumSize = 640f;
+        var centre = new Vector3((minX + maxX) / 2f, (minY + maxY) / 2f, 0f);
+        lod.transform.position = course.transform.TransformPoint(centre);
+        var scale = lod.transform.lossyScale;
+        if (Mathf.Abs(scale.x) < 1e-4f || Mathf.Abs(scale.y) < 1e-4f)
+        {
+            Debug.LogWarning("[RechargeMaps] course " + course.courseNumber + " has a zero-scale clone visibility trigger");
+            return;
+        }
+        box.offset = Vector2.zero;
+        box.size = new Vector2(
+            Mathf.Max(MinimumSize, maxX - minX + Padding * 2f) / Mathf.Abs(scale.x),
+            Mathf.Max(MinimumSize, maxY - minY + Padding * 2f) / Mathf.Abs(scale.y));
+        EnsureCloneVisibility(w, clones);
+    }
+
+    private static void EnsureCloneVisibility(MapWorld w, clonesScript clones)
+    {
+        if (clones == null) return;
+        var visibility = clones.GetComponent<MapCloneVisibility>();
+        if (visibility != null) return;
+        visibility = clones.gameObject.AddComponent<MapCloneVisibility>();
+        var owner = clones.GetComponentInParent<courseScript>();
+        visibility.Configure(clones, owner != null ? owner.courseNumber.ToString() : null);
+        var watched = clones;
+        w.OnUnload(() =>
+        {
+            if (watched != null) watched.isOnScreen(false);
+            if (visibility != null) UnityEngine.Object.Destroy(visibility);
+        });
     }
 
     // The finish stays the game's own, which records the best time, the clones and the save.
@@ -385,16 +466,21 @@ internal static class MapCourses
 
     // Items linked to one of the level's own courses: moved into that course
     // (a box becomes its upgrade) and taken out again on unload.
+    private static courseScript LevelCourse(int n) => Resources.FindObjectsOfTypeAll<courseScript>()
+        .Where(c => c != null && c.gameObject.scene.IsValid() && c.courseNumber == n && !MapWorld.IsMapObject(c.transform))
+        .OrderByDescending(c => RealAssetPalette.GetPath(c.transform).StartsWith("Courses/"))
+        .FirstOrDefault();
+
     private static void LinkLevelCourses(MapWorld w)
     {
+        var watchedClones = new HashSet<clonesScript>();
         foreach (var (go, id) in w.Links)
         {
             if (go == null || id == null || !id.StartsWith("level:") || !int.TryParse(id.Substring(6), out var n)) continue;
-            var course = Resources.FindObjectsOfTypeAll<courseScript>()
-                .Where(c => c != null && c.gameObject.scene.IsValid() && c.courseNumber == n && !MapWorld.IsMapObject(c.transform))
-                .OrderByDescending(c => RealAssetPalette.GetPath(c.transform).StartsWith("Courses/"))
-                .FirstOrDefault();
+            var course = LevelCourse(n);
             if (course == null) { Debug.LogWarning("[RechargeMaps] no level course " + n + " to link to"); continue; }
+            var clones = course.GetComponentInChildren<clonesScript>(true);
+            if (clones != null && watchedClones.Add(clones)) { EnsureCloneVisibility(w, clones); MapCloneVisibility.LogCourse("level " + n, clones); }
             var item = go;
             var box = go.GetComponent<MapUpgradeBox>();
             var local = course.GetComponentInChildren<localUpgrades>(true);
@@ -454,6 +540,40 @@ internal static class MapCourses
     }
 }
 
+// A checkpoint filed under a course counts only while that course's run is going: its trigger is switched
+// off the rest of the time, so the respawn point is the course's own during the run.
+internal class MapCourseCheckpoint : MonoBehaviour
+{
+    private courseScript _course;
+    private Collider2D[] _boxes;
+    private bool[] _was;
+
+    public static MapCourseCheckpoint Attach(GameObject go, courseScript course, string id)
+    {
+        var cp = go.GetComponentInChildren<checkpointScript>(true);
+        if (cp == null) return null;
+        var gate = cp.gameObject.GetComponent<MapCourseCheckpoint>() ?? cp.gameObject.AddComponent<MapCourseCheckpoint>();
+        gate._course = course;
+        gate._boxes = cp.GetComponents<Collider2D>();
+        gate._was = gate._boxes.Select(b => b.enabled).ToArray();
+        Debug.Log("[Navigator] course checkpoint " + go.name + " -> course " + (id ?? course.courseNumber.ToString()));
+        return gate;
+    }
+
+    private void FixedUpdate()
+    {
+        if (_course == null || _boxes == null) return;
+        var on = Reflect.GetField<bool>(_course, "tracking");
+        for (int i = 0; i < _boxes.Length; i++) if (_boxes[i] != null && _boxes[i].enabled != (on && _was[i])) _boxes[i].enabled = on && _was[i];
+    }
+
+    public void Release()
+    {
+        if (_boxes != null) for (int i = 0; i < _boxes.Length; i++) if (_boxes[i] != null) _boxes[i].enabled = _was[i];
+        Destroy(this);
+    }
+}
+
 // Logs a course's finish: the run's time and the best time the course keeps.
 // The run is read as of the last physics step: the gate may stop it first.
 internal class MapFinishLog : MonoBehaviour
@@ -484,6 +604,7 @@ internal class MapFinishLog : MonoBehaviour
     {
         yield return null;
         if (course == null) yield break;
+        MapSaves.SaveCourseRun(course);
         Debug.Log("[RechargeMaps] course " + course.courseNumber + " finished in " + run.ToString("0.00") + "s, best " + Reflect.GetField<float>(course, "bestPathTime").ToString("0.00") + "s, reward " + course.reward.ToString("0.##") + " (cash " + (globalStats.currencyLookup[globalStats.Currencies.Cash] - cashBefore).ToString("+0.##;-0.##") + ")" + (VmanScript.isCurrentlyVman ? " (V-man: not recorded)" : ""));
     }
 }

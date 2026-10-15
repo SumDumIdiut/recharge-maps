@@ -39,6 +39,16 @@ public static string StartMarker(JObject player) => "v9 " + player.ToString(Form
 
     public static void Reset() => _bought = new Dictionary<string, int>();
 
+    // A box's amount only ever goes up (no map refunds a purchase), so the stored count keeps the
+    // highest the box has shown: a stale or reset copy of the box can't write a purchase away.
+    public static void Remember(string id, int n)
+    {
+        if (id == null) return;
+        if (!_bought.TryGetValue(id, out var old)) old = 0;
+        if (n > old) _bought[id] = n;
+        else if (!_bought.ContainsKey(id)) _bought[id] = n;
+    }
+
     public static void Load(string folder)
     {
         Reset();
@@ -46,14 +56,22 @@ public static string StartMarker(JObject player) => "v9 " + player.ToString(Form
         {
             var path = Full(folder) + BoxesFile;
             if (File.Exists(path)) _bought = JsonConvert.DeserializeObject<Dictionary<string, int>>(File.ReadAllText(path)) ?? new Dictionary<string, int>();
+            Debug.Log("[RechargeMaps] upgrade boxes read from " + folder + ": " + _bought.Count + " entries, " + _bought.Count(p => p.Value > 0) + " bought (" +
+                      string.Join(", ", _bought.Where(p => p.Value > 0).Select(p => p.Key + "=" + p.Value)) + ")");
         }
         catch (Exception e) { Debug.LogWarning("[RechargeMaps] reading upgrade boxes failed: " + e.Message); }
     }
 
     public static void Save(string folder)
     {
-        foreach (var box in UnityEngine.Object.FindObjectsByType<MapUpgradeBox>(FindObjectsSortMode.None))
-            if (box.Id != null) _bought[box.Id] = box.Bought;
+        // Inactive boxes too (a box in a hidden zone is still the box that was bought).
+        foreach (var box in UnityEngine.Object.FindObjectsByType<MapUpgradeBox>(FindObjectsInactive.Include, FindObjectsSortMode.None))
+        {
+            if (box.Id == null) continue;
+            // A re-priced level box's count is the game's own course save; the map's boxes only go up.
+            if (box.PricingOnly) _bought[box.Id] = box.Bought;
+            else Remember(box.Id, box.Bought);
+        }
         try { File.WriteAllText(Full(folder) + BoxesFile, JsonConvert.SerializeObject(_bought)); }
         catch (Exception e) { Debug.LogWarning("[RechargeMaps] saving upgrade boxes failed: " + e.Message); }
     }
@@ -204,6 +222,7 @@ public static string StartMarker(JObject player) => "v9 " + player.ToString(Form
         var old = host.GetComponent<MapUpgradeBox>();
         if (old != null) UnityEngine.Object.DestroyImmediate(old);
         var cost = box.upgradeCost;
+        var baseCost = box.baseUpgradeCost;
         var cap = box.Cap;
         var mult = box.baseCapMult;
         var currencyField = typeof(upgradeBox).GetField("upgradeCurrency", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
@@ -215,6 +234,7 @@ public static string StartMarker(JObject player) => "v9 " + player.ToString(Form
             if (comp != null) UnityEngine.Object.Destroy(comp);
             if (box == null) return;
             box.upgradeCost = cost;
+            box.baseUpgradeCost = baseCost;
             box.Cap = cap;
             box.baseCapMult = mult;
             if (currency != null) currencyField.SetValue(box, currency);
@@ -237,6 +257,7 @@ internal class MapUpgradeBox : MonoBehaviour
 
     public string Id;
     public int Bought => _box != null ? _box.TimesUsed : 0;
+    public bool PricingOnly => _pricingOnly;
 
     private upgradeBox _box;
     private double[] _prices = { 10 };
@@ -245,6 +266,8 @@ internal class MapUpgradeBox : MonoBehaviour
     private string _label;
     private int _seen = -1;
     private TMP_Text _name;
+    private bool _hasBaseCost, _teleporters;
+    private double _baseCost;
 
     public void Setup(upgradeBox box, JObject cfg)
     {
@@ -252,7 +275,7 @@ internal class MapUpgradeBox : MonoBehaviour
         Id = cfg["id"]?.Value<string>();
         _label = cfg["label"]?.Value<string>();
         _prices = (cfg["prices"] as JArray)?.Select(p => p.Value<double>()).ToArray() ?? new double[0];
-        if (_prices.Length == 0) _prices = new[] { 10.0 };
+        if (_prices.Length == 0) _prices = new[] { cfg["cost"]?.Value<double>() ?? cfg["upgradeCost"]?.Value<double>() ?? cfg["price"]?.Value<double>() ?? 10.0 };
         _scale = cfg["scale"]?.Value<double>() ?? 1.5;
         _add = cfg["add"]?.Value<double>() ?? 0;
         _power = cfg["power"]?.Value<double>() ?? 1;
@@ -278,6 +301,7 @@ internal class MapUpgradeBox : MonoBehaviour
             case "wallJump": Movement(upgradeBox.movementUpgrades.wallJump); break;
             case "blockSwap": Movement(upgradeBox.movementUpgrades.swapBlocksOnce); break;
             case "zipMovers": Global(globalStats.globalUpgradeSet.zipMoversUnlocked); break;
+            case "teleporters": Global(globalStats.globalUpgradeSet.unlockTeleporters); _teleporters = true; break;
             case "omniDash": Global(globalStats.globalUpgradeSet.vmanTime); _omni = true; break;
             case "refreshers": Global(globalStats.globalUpgradeSet.unlockJiggleDrops); break;
             case "clones": Local(localUpgrades.localUpgradeSet.cloneCount); break;
@@ -295,6 +319,12 @@ internal class MapUpgradeBox : MonoBehaviour
             typeof(upgradeBox).GetField("upgradeCurrency", Any)?.SetValue(box, currency);
         typeof(upgradeBox).GetField("effectMult", Any)?.SetValue(box, 1.0);
         typeof(upgradeBox).GetField("TierMod", Any)?.SetValue(box, 0.0);
+        if (_teleporters)
+        {
+            var target = UnityEngine.Object.FindObjectsByType<TeleporterScript>(FindObjectsInactive.Include, FindObjectsSortMode.None).FirstOrDefault();
+            if (target != null) typeof(upgradeBox).GetField("ObjectReference", Any)?.SetValue(box, target.gameObject);
+            else Debug.LogWarning("[RechargeMaps] teleporters upgrade has no teleporter to refresh");
+        }
         _name = typeof(upgradeBox).GetField("upgradeNameDisplay", Any)?.GetValue(box) as TMP_Text;
 
         box.reactivateAndReset();
@@ -305,8 +335,14 @@ internal class MapUpgradeBox : MonoBehaviour
         box.baseCapMult = 1.0;
         box.Cap = _max;
         box.TimesUsed = Math.Min(MapUpgrades.Bought(Id), _max);
-        box.upgradeCost = PriceAt(box.TimesUsed);
+        if (box.TimesUsed > 0) Debug.Log("[RechargeMaps] upgrade box '" + Id + "' (" + cfg["kind"]?.Value<string>() + ") starts bought x" + box.TimesUsed);
+        box.upgradeCost = PriceForUse(box.TimesUsed);
+        _baseCost = cfg["baseCost"]?.Value<double>() ?? cfg["basecost"]?.Value<double>() ?? cfg["baseUpgradeCost"]?.Value<double>() ?? PriceAt(0);
+        _hasBaseCost = true;
+        box.baseUpgradeCost = _baseCost;
         box.isActive = box.TimesUsed < _max;
+        if (box.isActive) Call("updateCostTextDisplay");
+        else Call("deactivate");
     }
 
     public void SetupPricing(upgradeBox box, JObject cfg)
@@ -315,11 +351,15 @@ internal class MapUpgradeBox : MonoBehaviour
         Id = cfg["id"]?.Value<string>();
         _label = cfg["label"]?.Value<string>();
         _prices = (cfg["prices"] as JArray)?.Select(p => p.Value<double>()).ToArray() ?? new double[0];
-        if (_prices.Length == 0) _prices = new[] { box.upgradeCost };
+        if (_prices.Length == 0) _prices = new[] { cfg["cost"]?.Value<double>() ?? cfg["upgradeCost"]?.Value<double>() ?? cfg["price"]?.Value<double>() ?? box.upgradeCost };
         _scale = cfg["scale"]?.Value<double>() ?? 1.5;
         _add = cfg["add"]?.Value<double>() ?? 0;
         _power = cfg["power"]?.Value<double>() ?? 1;
         _max = Math.Max(1, cfg["max"]?.Value<int>() ?? box.Cap);
+        _baseCost = cfg["baseCost"]?.Value<double>() ?? cfg["basecost"]?.Value<double>() ?? cfg["baseUpgradeCost"]?.Value<double>() ?? PriceAt(0);
+        _hasBaseCost = true;
+        box.baseUpgradeCost = _baseCost;
+        box.upgradeCost = PriceForUse(box.TimesUsed);
         if (Enum.TryParse<globalStats.Currencies>(cfg["currency"]?.Value<string>() ?? "Cash", out var currency))
             typeof(upgradeBox).GetField("upgradeCurrency", Any)?.SetValue(box, currency);
         _name = typeof(upgradeBox).GetField("upgradeNameDisplay", Any)?.GetValue(box) as TMP_Text;
@@ -337,6 +377,7 @@ internal class MapUpgradeBox : MonoBehaviour
     }
 
     private bool _local, _linked, _omni;
+    private courseScript _course;
 
     // The game's own omni dash box also turns the world overgrown; a map's
     // box gives just the ability, and takes the midair jump it says it does.
@@ -361,12 +402,55 @@ internal class MapUpgradeBox : MonoBehaviour
     {
         var local = course.GetComponentInChildren<localUpgrades>(true);
         if (local == null) return;
+        _course = course;
         transform.SetParent(local.transform, true);
         typeof(upgradeBox).GetField("course", Any)?.SetValue(_box, course);
         typeof(upgradeBox).GetField("clones", Any)?.SetValue(_box, course.GetComponentInChildren<clonesScript>(true));
         typeof(upgradeBox).GetField("localUpgradeScript", Any)?.SetValue(_box, local);
         if (typeof(localUpgrades).GetField("ChildBoxes", Any)?.GetValue(local) is List<upgradeBox> boxes && !boxes.Contains(_box)) boxes.Add(_box);
         _linked = true;
+    }
+
+    public static void RestoreLinkedCourseEffects()
+    {
+        var linked = UnityEngine.Object.FindObjectsByType<MapUpgradeBox>(FindObjectsSortMode.None)
+            .Where(box => box._linked && box._local && !box._pricingOnly && box._box != null && box._course != null && box.Bought > 0)
+            .GroupBy(box => box._course);
+
+        foreach (var courseGroup in linked)
+        {
+            var course = courseGroup.Key;
+            var local = course.GetComponentInChildren<localUpgrades>(true);
+            if (local == null) continue;
+
+            foreach (var upgradeGroup in courseGroup.GroupBy(box => box._box.upgrade))
+            {
+                var bought = upgradeGroup.Sum(box => (double)box.Bought);
+                if (!local.localUpgradeDict.TryGetValue(upgradeGroup.Key, out var current) || bought > current)
+                    local.localUpgradeDict[upgradeGroup.Key] = bought;
+            }
+
+            var clones = course.GetComponentInChildren<clonesScript>(true);
+            if (clones != null && local.localUpgradeDict.TryGetValue(localUpgrades.localUpgradeSet.cloneCount, out var cloneUpgrade))
+            {
+                var desired = Math.Max(clones.cloneCount, (int)Math.Ceiling(cloneUpgrade));
+                if (desired > clones.cloneCount)
+                {
+                    clones.gameObject.SetActive(true);
+                    while (clones.cloneCount < desired) clones.spawnNewCloneVisual();
+                }
+            }
+
+            try
+            {
+                course.fullUpdate();
+                local.updateAllBoxes();
+            }
+            catch (Exception e)
+            {
+                Debug.LogWarning("[RechargeMaps] couldn't refresh restored upgrades for course " + course.courseNumber + ": " + e.Message);
+            }
+        }
     }
 
     public void Unlink(localUpgrades local)
@@ -388,11 +472,36 @@ internal class MapUpgradeBox : MonoBehaviour
         return c;
     }
 
+    private double PriceForUse(int n)
+    {
+        if (_box == null) return PriceAt(n);
+        var courseField = typeof(upgradeBox).GetField("course", Any);
+        var course = (courseField?.GetValue(_box) as courseScript) ?? _box.GetComponentInParent<courseScript>();
+        if (course == null) return PriceAt(n);
+        var tierField = typeof(upgradeBox).GetField("TierMod", Any);
+        var tierMod = tierField != null ? Convert.ToDouble(tierField.GetValue(_box)) : 0.0;
+        return PriceAt(n) * Math.Pow(10.0, course.tier + tierMod);
+    }
+
     private void Call(string method) => typeof(upgradeBox).GetMethod(method, Any, null, Type.EmptyTypes, null)?.Invoke(_box, null);
 
     private void LateUpdate()
     {
         if (_box == null) return;
+        // Something outside this box (the game loading a course save by child position, a reset)
+        // set the amount below what was bought: the stored amount wins; purchases raise it.
+        if (!_pricingOnly && Id != null && _seen >= 0)
+        {
+            var stored = Math.Min(MapUpgrades.Bought(Id), _max);
+            if (_box.TimesUsed < stored)
+            {
+                Debug.LogWarning("[RechargeMaps] upgrade box '" + Id + "' was reset from " + stored + " to " + _box.TimesUsed + " by something else; restoring it");
+                _box.TimesUsed = stored;
+                _seen = -1;
+            }
+            else if (_box.TimesUsed > stored) MapUpgrades.Remember(Id, _box.TimesUsed);
+        }
+        if (_hasBaseCost && _box.baseUpgradeCost != _baseCost) _box.baseUpgradeCost = _baseCost;
         if (_local && !_linked)
         {
             if (_box.isActive) Call("deactivate");
@@ -402,6 +511,9 @@ internal class MapUpgradeBox : MonoBehaviour
         if (_box.TimesUsed != _seen)
         {
             if (_omni && _seen >= 0 && _box.TimesUsed > _seen) GiveOmniDash();
+            if (_teleporters && _box.TimesUsed > _seen)
+                foreach (var teleporter in UnityEngine.Object.FindObjectsByType<TeleporterScript>(FindObjectsInactive.Include, FindObjectsSortMode.None))
+                    if (teleporter != null) teleporter.updateVisuals();
             _seen = _box.TimesUsed;
             if (_seen < _max)
             {
@@ -410,7 +522,7 @@ internal class MapUpgradeBox : MonoBehaviour
                     _box.reactivateAndReset();
                     _box.TimesUsed = _seen;
                 }
-                _box.upgradeCost = PriceAt(_seen);
+                _box.upgradeCost = PriceForUse(_seen);
                 Call("updateCostTextDisplay");
             }
             else if (_box.isActive) Call("deactivate");

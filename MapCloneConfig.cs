@@ -18,6 +18,28 @@ internal static class MapCloneConfig
         foreach (var tx in go.GetComponentsInChildren<TMPro.TMP_Text>(true)) tx.alpha *= alpha;
     }
 
+    // Trigger areas are invisible in the base game; the sprite some of them carry (a checkpoint's
+    // yellow vertical bars) must never be drawn in a map. Their behaviour and colliders stay.
+    private static readonly string[] ZoneScripts =
+    {
+        "checkpointScript", "longFallColliderController", "TutorialTextTrigger", "EndCreditsTrigger",
+        "FakeCreditsControlScript", "tripBreakerScript", "SceneTransitionObject",
+    };
+
+    public static void HideZoneArt(GameObject root)
+    {
+        if (root == null) return;
+        foreach (var mb in root.GetComponentsInChildren<MonoBehaviour>(true))
+        {
+            if (mb == null || Array.IndexOf(ZoneScripts, mb.GetType().Name) < 0) continue;
+            foreach (var sr in mb.GetComponents<SpriteRenderer>())
+            {
+                sr.enabled = false;
+                if (sr.GetComponent<MapZoneArtKeeper>() == null) sr.gameObject.AddComponent<MapZoneArtKeeper>();
+            }
+        }
+    }
+
     // A checkpoint's trigger box as the editor sized it, in world units around the object.
     private static void SizeCheckpoint(GameObject clone, JObject trig)
     {
@@ -31,6 +53,10 @@ internal static class MapCloneConfig
         var at = (Vector2)(clone.transform.position - box.transform.position);
         box.size = new Vector2((trig["w"]?.Value<float>() ?? 100f) / Mathf.Abs(s.x), (trig["h"]?.Value<float>() ?? 100f) / Mathf.Abs(s.y));
         box.offset = new Vector2((at.x + (trig["dx"]?.Value<float>() ?? 0f)) / s.x, (at.y + (trig["dy"]?.Value<float>() ?? 0f)) / s.y);
+        // The flag (and a checkpoint's respawn point) stands at the clone's own position; the box centre is where the map says.
+        var flag = MapWorld.LevelOf(clone.transform.position);
+        var centre = MapWorld.LevelOf(box.bounds.center);
+        Debug.Log("[Navigator] checkpoint " + clone.name + " flag at (" + flag.x.ToString("0.#") + "," + flag.y.ToString("0.#") + "), trigger " + (trig["w"]?.Value<float>() ?? 100f) + "x" + (trig["h"]?.Value<float>() ?? 100f) + " centred (" + centre.x.ToString("0.#") + "," + centre.y.ToString("0.#") + ") from offset (" + (trig["dx"]?.Value<float>() ?? 0f) + "," + (trig["dy"]?.Value<float>() ?? 0f) + ")");
     }
 
     public static void Apply(GameObject clone, JObject obj)
@@ -226,11 +252,17 @@ internal class MapZipAutoStart : MonoBehaviour
 {
     public float FirstPause = 1f;
     private static readonly MethodInfo Advance = typeof(PlatformMover).GetMethod("IE_AdvanceToNextState", BindingFlags.Instance | BindingFlags.NonPublic);
+    private bool _started;
 
     private void OnEnable() => StartCoroutine(Kick());
+    private void OnDisable() => _started = false;
 
     private System.Collections.IEnumerator Kick()
     {
+        while (!_started && (!globalStats.globalUpgradeDict.TryGetValue(globalStats.globalUpgradeSet.zipMoversUnlocked, out var unlocked) || unlocked == 0))
+            yield return null;
+        if (_started) yield break;
+        _started = true;
         // PlatformMover.OnEnable jumps back to its start over a couple of physics steps.
         for (int i = 0; i < 3; i++) yield return new WaitForFixedUpdate();
         if (FirstPause > 0f) yield return new WaitForSeconds(FirstPause);
@@ -238,4 +270,12 @@ internal class MapZipAutoStart : MonoBehaviour
         if (mover == null || Advance == null || Recharge.ModApi.Reflect.GetField<bool>(mover, "isPhaseChangeInProgess")) yield break;
         mover.StartCoroutine((System.Collections.IEnumerator)Advance.Invoke(mover, null));
     }
+}
+
+// Keeps a trigger area's sprite off even if the game's own scripts or animations switch it on.
+internal class MapZoneArtKeeper : MonoBehaviour
+{
+    private SpriteRenderer _sr;
+    private void Awake() => _sr = GetComponent<SpriteRenderer>();
+    private void LateUpdate() { if (_sr != null && _sr.enabled) _sr.enabled = false; }
 }

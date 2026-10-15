@@ -41,6 +41,8 @@ internal class MapWorld
 
     // Collected while objects spawn, resolved once everything exists.
     public readonly List<(GameObject go, string course)> Links = new List<(GameObject, string)>();
+    // The level's own checkpoints the map files under a course (checkpoint, course id), resolved with the courses.
+    public readonly List<(checkpointScript checkpoint, string course)> CheckpointLinks = new List<(checkpointScript, string)>();
     public readonly List<(GameObject go, JObject cfg)> Teleports = new List<(GameObject, JObject)>();
     public readonly Dictionary<string, Sprite> CustomImages = new Dictionary<string, Sprite>();
     // Placed objects and free spikes with their place in the editor's stack.
@@ -196,7 +198,7 @@ internal class MapWorld
     // A tilemap of the map's own, made like the game's `template` tilemap (and
     // so behaving like it: its colliders, spikeScript...). In an overlay it
     // sits beside the real one, on the same grid.
-    public Tilemap OwnTilemap(string name, string template)
+    public Tilemap OwnTilemap(string name, string template, bool independentGrid = false)
     {
         if (_own.TryGetValue(name, out var existing) && existing != null) return existing;
         GameObject go;
@@ -204,7 +206,13 @@ internal class MapWorld
         if (Overlay)
         {
             if (real == null) throw new Exception("no '" + template + "' tilemap in this scene");
-            go = UnityEngine.Object.Instantiate(real.gameObject, real.transform.parent);
+            var parent = independentGrid && real.layoutGrid != null ? GridLike(real.layoutGrid) : real.transform.parent;
+            go = UnityEngine.Object.Instantiate(real.gameObject, parent);
+            if (parent != real.transform.parent)
+            {
+                go.transform.SetPositionAndRotation(Live(LevelOf(real.transform.position) + _shift), real.transform.rotation);
+                go.transform.localScale = real.transform.lossyScale;
+            }
             var made = go;
             OnUnload(() => { if (made != null) UnityEngine.Object.Destroy(made); });
         }
